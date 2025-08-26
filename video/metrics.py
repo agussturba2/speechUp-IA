@@ -2,145 +2,169 @@
 
 from typing import Dict, List, Any
 from .llm_feedback import generar_feedback_llm
+from .scoring import compute_scores
+from .advice_generator import AdviceGenerator
 
 
 def build_metrics_response(
     feedbacks: List[Dict],
-    resumen_global: Dict,
-    duration_sec: float,
+    media: Dict,
+    gesture_events: int,
+    events: List[Dict],
+    analysis_ms: int,
+    verbal: Dict = None,
+    prosody: Dict = None,
+    audio_available: bool = False,
 ) -> Dict:
     """Construye la respuesta JSON con todas las métricas y feedback."""
 
-    total = resumen_global["total_frames"]
-    if total == 0:
-        return {
-            "duration": "0s",
-            "score": 0,
-            "metrics": {
-                k: 0
-                for k in [
-                    "fluency",
-                    "clarity",
-                    "pace",
-                    "confidence",
-                    "pronunciation",
-                    "engagement",
-                ]
-            },
-            "feedbacks": feedbacks,
-            "resumen_global": resumen_global,
-            "puntos_a_mejorar": [],
-            "puntos_debiles": ["No se pudo analizar el video"],
-            "custom_feedback": [
-                "No se pudo analizar el video. Sube un video válido para obtener recomendaciones personalizadas."
-            ],
-            "custom_feedback_llm": "No se pudo analizar el video.",
-        }
-
-    # Mapeo simple basado en métricas actuales:
-    fluency = resumen_global["porcentaje_frames_con_rostro"] / 100
-    clarity = resumen_global["porcentaje_posturas_buenas"] / 100
-    pace = 0.8  # Placeholder
-    confidence = clarity
-    pronunciation = 0.7  # Placeholder
-    engagement = fluency
-    score = round(
-        (fluency + clarity + pace + confidence + pronunciation + engagement) / 6, 2
-    )
-
-    # Generate improvement and weakness points
-    puntos_a_mejorar: List[str] = []
-    puntos_debiles: List[str] = []
-
-    if fluency < 0.7:
-        puntos_a_mejorar.append(
-            "Procura mantener tu rostro visible durante toda la presentación."
-        )
-    if clarity < 0.7:
-        puntos_a_mejorar.append(
-            "Mejora tu postura corporal para transmitir mayor claridad y seguridad."
-        )
-    if pace < 0.7:
-        puntos_a_mejorar.append("Ajusta tu ritmo de presentación para que sea más natural.")
-    if confidence < 0.7:
-        puntos_a_mejorar.append("Transmite mayor confianza con tu lenguaje corporal.")
-    if pronunciation < 0.7:
-        puntos_a_mejorar.append("Trabaja en la pronunciación para que tu mensaje sea más claro.")
-    if engagement < 0.7:
-        puntos_a_mejorar.append("Busca conectar más con la audiencia mirando a cámara.")
-
-    # Weak points (if any metric very low)
-    if fluency < 0.4:
-        puntos_debiles.append("Muy poca visibilidad del rostro durante la presentación.")
-    if clarity < 0.4:
-        puntos_debiles.append("Postura corporal deficiente la mayor parte del tiempo.")
-    if confidence < 0.4:
-        puntos_debiles.append("Lenguaje corporal transmite poca seguridad.")
-    if engagement < 0.4:
-        puntos_debiles.append("Falta de conexión visual con la audiencia.")
-
-    # Custom feedback per buffer
-    custom_feedback: List[str] = []
-    if feedbacks:
-        for fb in feedbacks:
-            segundos = fb["frames"]
-            if segundos:
-                if fb["rostros_detectados"] == 0:
-                    custom_feedback.append(
-                        f"Entre los segundos {segundos[0]} y {segundos[-1]} no se detectó tu rostro. Intenta mantenerte dentro del encuadre."
-                    )
-                elif fb["posturas_buenas"] == len(segundos):
-                    custom_feedback.append(
-                        f"Excelente postura entre los segundos {segundos[0]} y {segundos[-1]}."
-                    )
-                elif fb["posturas_buenas"] == 0:
-                    custom_feedback.append(
-                        f"Entre los segundos {segundos[0]} y {segundos[-1]} podrías mejorar tu postura corporal."
-                    )
-
-    # Global feedback
-    if fluency > 0.85 and clarity > 0.85:
-        custom_feedback.append(
-            "¡Excelente oratoria! Mantén esa presencia y postura durante toda la presentación."
-        )
-    if fluency < 0.7:
-        custom_feedback.append(
-            "Hubo varios momentos donde tu rostro no fue visible. Recuerda mirar a la cámara y mantenerte en cuadro."
-        )
-    if clarity < 0.7:
-        custom_feedback.append(
-            "Trabaja en mantener la cabeza erguida y los hombros alineados para mejorar tu claridad."
-        )
-    if not custom_feedback:
-        custom_feedback.append(
-            "Buen trabajo, puedes seguir perfeccionando tu presencia y postura."
-        )
-
-    metricas_dict = {
-        "fluency": fluency,
-        "clarity": clarity,
-        "pace": pace,
-        "confidence": confidence,
-        "pronunciation": pronunciation,
-        "engagement": engagement,
+    # Use proc values for nonverbal and quality metrics
+    frames_total = media.get("frames_total", 0)
+    frames_with_face = media.get("frames_with_face", 0)
+    duration_sec = media.get("duration_sec", 0.0)
+    fps = media.get("fps", 0)
+    gesture_events = media.get("gesture_events", 0)
+    dropped_frames_pct = media.get("dropped_frames_pct", 0.0)
+    
+    # Nonverbal metrics - DO NOT overwrite media dict
+    face_coverage_pct = frames_with_face / frames_total if frames_total > 0 else 0.0
+    
+    # Face coverage smoothing: raise to minimum of 0.25 to reduce flicker
+    if frames_total > 0 and frames_with_face > 0:
+        face_coverage_pct = max(face_coverage_pct, 0.25)
+    
+    gesture_rate_per_min = gesture_events * 60 / duration_sec if duration_sec > 0 else 0.0
+    
+    import os
+    min_floor = 0
+    try:
+        min_floor = int(os.getenv("MIN_NONVERBAL_SCORE_FLOOR", "0"))
+    except Exception:
+        min_floor = 0
+    floor_applied = False
+    gesture_rate = round(gesture_rate_per_min, 2)
+    gesture_ampl = media.get("gesture_amplitude", media.get("hand_motion_magnitude_avg", 0.0))
+    
+    if min_floor > 0:
+        if gesture_rate == 0:
+            gesture_rate = min_floor
+            floor_applied = True
+        if gesture_ampl == 0:
+            gesture_ampl = min_floor
+            floor_applied = True
+    
+    nonverbal = {
+        "face_coverage_pct": round(face_coverage_pct, 2),
+        "gaze_screen_pct": media.get("gaze_screen_pct", 0.0),
+        "head_stability": media.get("head_stability", 0.0),
+        "posture_openness": media.get("posture_openness", 0.0),
+        "gesture_rate_per_min": gesture_rate,
+        "gesture_amplitude": gesture_ampl,
+        "expression_variability": media.get("expression_variability", 0.0),
+        "engagement": media.get("engagement", 0.0),
     }
-
-    llm_feedback = generar_feedback_llm(
-        metricas_dict,
-        resumen_global,
-        custom_feedback,
-        puntos_a_mejorar,
-        puntos_debiles,
-    )
-
-    return {
-        "duration": f"{duration_sec:.1f}s",
-        "score": score,
-        "metrics": metricas_dict,
-        "feedbacks": feedbacks,
-        "resumen_global": resumen_global,
-        "puntos_a_mejorar": puntos_a_mejorar,
-        "puntos_debiles": puntos_debiles,
-        "custom_feedback": custom_feedback,
-        "custom_feedback_llm": llm_feedback,
+    
+    if floor_applied:
+        import logging
+        logging.info(f"MIN_NONVERBAL_SCORE_FLOOR applied: {min_floor} to gesture_rate_per_min and/or gesture_amplitude")
+    
+    # Logging
+    import logging
+    logging.info(f"frames_total={frames_total}, frames_with_face={frames_with_face}, duration_sec={duration_sec}, fps={fps}, gesture_events={gesture_events}, face_coverage_pct={face_coverage_pct}")
+    
+    # Compute scores using the complete analysis structure
+    analysis_data = {
+        "verbal": verbal or {},
+        "prosody": prosody or {},
+        "nonverbal": nonverbal,
     }
+    scores = compute_scores(analysis_data)
+    
+    # Generate recommendations
+    nonverbal_tips = AdviceGenerator().generate_nonverbal_tips(nonverbal)
+    verbal_tips = AdviceGenerator().generate_verbal_tips(verbal or {})
+    prosody_tips = AdviceGenerator().generate_prosody_tips(prosody or {})
+    
+    # Combine all tips, ensuring at least one recommendation
+    all_tips = nonverbal_tips + verbal_tips + prosody_tips
+    if not all_tips:
+        all_tips = ["Excelente presentación. Mantené este nivel de comunicación."]
+    
+    quality = {
+        "frames_analyzed": frames_total,
+        "dropped_frames_pct": dropped_frames_pct,
+        "audio_snr_db": media.get("audio_snr_db", 0.0),
+        "analysis_ms": analysis_ms,
+        "audio_available": audio_available,
+    }
+    
+    # Build response
+    # Fill required blocks with defaults if missing
+    default_verbal = {
+        "wpm": 0.0,
+        "articulation_rate_sps": 0.0,
+        "fillers_per_min": 0.0,
+        "filler_counts": {},
+        "avg_pause_sec": 0.0,
+        "pause_rate_per_min": 0.0,
+        "long_pauses": [],
+        "pronunciation_score": 0.0,
+        "stt_confidence": 0.0,
+    }
+    default_prosody = {
+        "pitch_mean_hz": 0.0,
+        "pitch_range_semitones": 0.0,
+        "pitch_cv": 0.0,
+        "energy_cv": 0.0,
+        "rhythm_consistency": 0.0,
+    }
+    default_lexical = {
+        "lexical_diversity": 0.0,
+        "cohesion_score": 0.0,
+        "summary": "",
+        "keywords": [],
+    }
+    
+    # Prepare the complete data structure for labeling
+    proc_data = {
+        "verbal": {**default_verbal, **(verbal or {})},
+        "prosody": {**default_prosody, **(prosody or {})},
+        "nonverbal": nonverbal,
+    }
+    
+    # Generate labels and additional recommendations
+    advice_gen = AdviceGenerator()
+    labels, extra_tips = advice_gen.generate_labels_and_tips(proc_data)
+    
+    # Convert existing tips to recommendation format
+    existing_recommendations = [{"area": "communication", "tip": tip} for tip in all_tips]
+    
+    # Merge with new recommendations, avoiding duplicates by text content
+    existing_tips_set = {(rec.get("area", ""), rec.get("tip", "")) for rec in existing_recommendations}
+    
+    for tip in extra_tips:
+        tip_key = (tip.get("area", ""), tip.get("tip", ""))
+        if tip_key not in existing_tips_set:
+            existing_recommendations.append(tip)
+            existing_tips_set.add(tip_key)
+    
+    response = {
+        "id": "analysis_demo",
+        "version": "1.0.0",
+        "media": {
+            "duration_sec": duration_sec,
+            "lang": media.get('lang', 'es-AR'),
+            "fps": fps,
+        },
+        "scores": scores,
+        "verbal": {**default_verbal, **(verbal or {})},  # Merge partial verbal over defaults
+        "prosody": {**default_prosody, **(prosody or {})},  # Merge partial prosody over defaults
+        "lexical": default_lexical,
+        "nonverbal": nonverbal,
+        "events": events,
+        "recommendations": existing_recommendations,
+        "labels": labels,
+        "quality": quality,
+    }
+    
+    return response

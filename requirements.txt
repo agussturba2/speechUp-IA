@@ -1,44 +1,26 @@
-fastapi~=0.115.13
-uvicorn
-opencv-python-headless
-numpy~=1.26.4
-mediapipe~=0.10.21
-python-multipart
-websockets~=15.0.1
-# Soporte para GPU y optimizaciones
-opencv-contrib-python-headless
-pycuda
-numba~=0.61.2
-cudatoolkit
-memory-profiler
-py-cpuinfo
-diskcache~=5.6.3
-psutil~=7.0.0
 
-# Análisis de audio
-librosa~=0.11.0
-soundfile~=0.13.1
-pydub~=0.25.1
-praat-parselmouth
-webrtcvad
-vosk~=0.3.45
-whisper
-tensorflow~=2.19.0
-tensorflow-hub
-speech-recognition
+fastapi~=0.115
+uvicorn~=0.35
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+mediapipe==0.10.21
+python-multipart==0.0.20
+websockets==15.0.1
+pydantic==2.11.7
+pydantic-settings==2.10.1
+requests==2.32.3
 
-# Análisis gestual avanzado
-mediapipe-silero-vad
-mediapipe-holistic
-scipy
-scikit-learn
-opencv-python-rolleyes
-dlib
+# Audio processing dependencies
+ffmpeg-python
+webrtcvad-wheels
+openai-whisper
 
-aiofiles~=24.1.0
-opencv-python~=4.11.0.86
-starlette~=0.46.2
-webrtcvad-wheels~=2.0.14
-requests~=2.32.3
-pydantic~=2.11.7
-pydantic-settings~=2.10.1
+# Additional dependencies for full functionality and testing
+httpx
+aiofiles
+librosa==0.10.2.post1
+pydub
+pytest
+psutil
+vosk
+diskcache
