@@ -1,636 +1,340 @@
-# 🎯 SpeechUp-IA: Oratory Analysis Backend
+# SpeechUp-IA — Multimodal Oratory Feedback (API + Pipeline)
 
-A FastAPI-powered backend that analyzes short videos to provide comprehensive feedback on public speaking performance, covering both nonverbal communication and speech patterns.
+SpeechUp-IA analyzes **video + audio** and returns **human-friendly feedback** about speaking performance: rhythm, pauses, filler words, prosody (pitch/energy variation), gaze, posture, head stability, gestures, and more. It also generates **labels** (e.g., "ritmo adecuado", "gestualidad activa") and **actionable advice** in Spanish (es-AR).
 
-## 📖 Introduction
-
-**SpeechUp-IA** is an intelligent oratory analysis system that processes short videos (typically 30 seconds to 5 minutes) and returns structured, actionable feedback. It's designed for public speakers, presenters, and anyone looking to improve their communication skills.
-
-### 🎯 Purpose
-The system analyzes two key aspects of communication:
-
-- **Nonverbal Communication**: Gestures, gaze patterns, posture, facial expressions, and overall engagement
-- **Verbal Communication**: Speech patterns, pauses, speaking rate, and vocal delivery
-
-### 📤 Output
-Every analysis returns a standardized JSON response (`AnalysisJSON`) containing:
-- **Scores**: Numerical ratings (0-100) for fluency, clarity, pace, engagement, and delivery confidence
-- **Metrics**: Detailed measurements for both verbal and nonverbal aspects
-- **Events**: Timeline of detected gestures and key moments
-- **Recommendations**: Personalized, actionable tips for improvement
-- **Quality**: Analysis metadata and confidence indicators
-
-### 🔄 High-Level System Overview
-
-```mermaid
-flowchart LR
-    A[📹 Video Input] --> B[⚙️ Processing Pipeline]
-    B --> C[📊 JSON Output]
-    
-    subgraph B ["Processing Pipeline"]
-        D[🎥 Video Analysis<br/>MediaPipe + CV]
-        E[🎙️ Audio Analysis<br/>FFmpeg + VAD]
-    end
-    
-    subgraph C ["AnalysisJSON Response"]
-        F[📈 Scores<br/>0-100 ratings]
-        G[📊 Metrics<br/>Verbal + Nonverbal]
-        H[🎯 Events<br/>Timeline]
-        I[💡 Recommendations<br/>Actionable tips]
-    end
-```
-
-**ASCII Fallback:**
-```
-Video Input → [Video Analysis + Audio Analysis] → JSON Output
-                ↓                    ↓
-            MediaPipe CV        FFmpeg + VAD
-                ↓                    ↓
-            Nonverbal Metrics   Pause Metrics
-                ↓                    ↓
-            [Scores + Metrics + Events + Recommendations]
-```
-
-## 🛠️ Installation
-
-### 1. Clone Repository
-```bash
-git clone <repository-url>
-cd speechUp-IA
-```
-
-### 2. Create Virtual Environment
-```bash
-python -m venv .venv
-```
-
-### 3. Activate Virtual Environment
-
-**Windows (PowerShell):**
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
-
-**Windows (Command Prompt):**
-```cmd
-.\.venv\Scripts\activate.bat
-```
-
-**Linux/macOS:**
-```bash
-source .venv/bin/activate
-```
-
-### 4. Install Dependencies
-```bash
-pip install -r requirements.txt
-```
-
-### 5. Install FFmpeg (Required for Audio Analysis)
-
-**Windows:**
-```powershell
-winget install --id=Gyan.FFmpeg -e
-```
-
-**macOS:**
-```bash
-brew install ffmpeg
-```
-
-**Linux (Ubuntu/Debian):**
-```bash
-sudo apt update
-sudo apt install ffmpeg
-```
-
-**Verify Installation:**
-```bash
-ffmpeg -version
-```
-
-## ⚙️ Running the API
-
-### Start API Without Audio Analysis
-```bash
-uvicorn api.main:app --reload
-```
-
-### Start API With Audio Analysis Enabled
-```bash
-# Windows PowerShell
-$env:SPEECHUP_USE_AUDIO=1
-uvicorn api.main:app --reload
-
-# Linux/macOS
-export SPEECHUP_USE_AUDIO=1
-uvicorn api.main:app --reload
-```
-
-### Start API With ASR Transcription Enabled
-```bash
-# Windows PowerShell
-$env:SPEECHUP_USE_AUDIO=1
-$env:SPEECHUP_USE_ASR=1
-uvicorn api.main:app --reload
-
-# Linux/macOS
-export SPEECHUP_USE_AUDIO=1
-export SPEECHUP_USE_ASR=1
-uvicorn api.main:app --reload
-```
-
-**Note**: ASR requires audio to be enabled (`SPEECHUP_USE_AUDIO=1`).
-
-### Start API With Prosody Analysis Enabled
-```bash
-# Windows PowerShell
-$env:SPEECHUP_USE_AUDIO=1
-$env:SPEECHUP_USE_PROSODY=1
-uvicorn api.main:app --reload
-
-# Linux/macOS
-export SPEECHUP_USE_AUDIO=1
-export SPEECHUP_USE_PROSODY=1
-uvicorn api.main:app --reload
-```
-
-**Note**: Prosody analysis requires audio to be enabled (`SPEECHUP_USE_AUDIO=1`).
-
-### 🎯 ASR Performance & Setup
-- **Model Download**: First run downloads Whisper model to `~/.cache/whisper/`
-- **Auto-Model Selection**: Automatically selects optimal model based on device (GPU: `small`, CPU: `base`)
-- **Model Override**: Use `SPEECHUP_ASR_MODEL` to override auto-selection
-- **Timeout Protection**: 25-second hard limit prevents hanging on long audio files
-
-The API will be available at `http://localhost:8000`
-
-#### **Whisper Model Selection Guide**
-
-| Model | Size | Speed | Accuracy | Use Case |
-|-------|------|-------|----------|----------|
-| `tiny` | 39 MB | ⚡⚡⚡ | ⭐⭐ | Fast prototyping, low accuracy needs |
-| `base` | 74 MB | ⚡⚡ | ⭐⭐⭐ | **CPU default**, balanced performance |
-| `small` | 244 MB | ⚡ | ⭐⭐⭐⭐ | **GPU default**, high accuracy |
-| `medium` | 769 MB | 🐌 | ⭐⭐⭐⭐⭐ | Maximum accuracy, slower processing |
-| `large` | 1550 MB | 🐌🐌 | ⭐⭐⭐⭐⭐ | Best accuracy, slowest processing |
-
-**Performance Tips:**
-- **CPU Usage**: `base` model provides optimal speed/accuracy balance
-- **GPU Usage**: `small` model offers excellent accuracy with reasonable speed
-- **High Accuracy**: Use `medium` or `large` for critical applications
-- **WPM Smoothing**: Automatically applied for videos ≥20s using 3-point moving average
-
-**STT Confidence Metrics:**
-- **Real Whisper Probabilities**: `stt_confidence` is computed from actual Whisper decoder probabilities, not heuristics
-- **Confidence Components**: Combines `avg_logprob` (decoder confidence) and `no_speech_prob` (speech detection)
-- **Segment-Level Analysis**: Confidence computed across all valid speech segments
-- **Normalized Scale**: Output normalized to [0.0, 1.0] range for easy interpretation
-
-**Privacy & Logging:**
-- **Transcript Privacy**: Full transcript is not logged by default; only `transcript_short` (first 200 chars) appears in DEBUG logs
-- **Data Retention**: No transcript data is stored persistently; only processed metrics are returned
-
-**Note:**
-- ASR processes up to the first 20s of audio for performance. You can increase this via the `SPEECHUP_ASR_MAX_WINDOW_SEC` environment variable.
-- Set `SPEECHUP_DEBUG_ASR=1` to enable detailed ASR debug logging (device, model, transcript snippet, errors).
-- Override device selection with `WHISPER_DEVICE=cpu|cuda|mps` if needed.
-
-### 🏷️ Labels & Feedback System
-
-**Labels and Feedback** provide human-friendly insights based on quantitative analysis results, making the API responses more accessible and actionable.
-
-### **Labels Generated**
-The system automatically generates 0-5 descriptive labels based on:
-
-- **Speaking Rate**: "ritmo lento", "ritmo adecuado", "ritmo acelerado"
-- **Filler Words**: "pocas muletillas", "muchas muletillas"
-- **Pause Patterns**: "pausas regulares", "pausas caóticas", "pausas largas"
-- **Prosody**: "entonación plana", "entonación expresiva", "bajo contraste de energía", "buen contraste de energía"
-- **Gestures**: "pocos gestos", "gestualidad activa"
-
-### **Recommendations Structure**
-Each recommendation includes:
-- **area**: Categorization (comunicación, voz, presencia)
-- **tip**: Specific, actionable advice in Spanish (es-AR)
-
-### **Example Output**
-```json
-"labels": ["ritmo adecuado", "pocas muletillas", "pausas regulares", "entonación expresiva"],
-"recommendations": [
-  {"area": "comunicación", "tip": "Buen ritmo: claro y fácil de seguir."},
-  {"area": "voz", "tip": "Variá la entonación en palabras clave (subí 2–3 semitonos)."}
-]
-```
-
-## 🎵 Prosody Analysis (MVP)
-
-**Prosody** analyzes the musical aspects of speech including pitch, energy, and rhythm patterns. This feature is gated by the `SPEECHUP_USE_PROSODY` environment variable.
-
-#### **Enable Prosody Analysis**
-```bash
-# Windows PowerShell
-$env:SPEECHUP_USE_AUDIO=1
-$env:SPEECHUP_USE_PROSODY=1
-uvicorn api.main:app --reload
-
-# Linux/macOS
-export SPEECHUP_USE_AUDIO=1
-export SPEECHUP_USE_PROSODY=1
-uvicorn api.main:app --reload
-```
-
-#### **Prosody Metrics**
-
-| Metric | Description | Range | Computation |
-|--------|-------------|-------|-------------|
-| `pitch_mean_hz` | Average fundamental frequency (F0) in Hz | 0+ Hz | Mean of voiced frames using librosa.pyin |
-| `pitch_range_semitones` | Pitch variation range in semitones | 0+ st | 12 × log2(f0/median) range across voiced frames |
-| `pitch_cv` | Pitch coefficient of variation | [0, 1] | Standard deviation / mean of voiced F0 values |
-| `energy_cv` | Energy coefficient of variation | [0, 1] | RMS energy variation across audio frames |
-| `rhythm_consistency` | Speech rhythm regularity | [0, 1] | 1 - CV of inter-onset intervals from VAD segments |
-
-#### **Technical Details**
-- **Audio Format**: Uses 16kHz mono WAV extracted by `video/audio_utils.py`
-- **Pitch Tracking**: Robust F0 estimation with `librosa.pyin` (75-400 Hz range)
-- **Error Handling**: Graceful fallback to zeros if computation fails
-- **Performance**: Minimal latency impact when enabled
-- **Dependencies**: Requires `librosa` and `numpy`
-
-#### **Prosody-Based Recommendations**
-The system automatically generates prosody-specific tips:
-- **Low pitch variation** (< 2 semitones): Suggests adding tonal emphasis
-- **Low energy dynamics** (< 0.1 CV): Recommends volume variation
-- **Poor rhythm consistency** (< 0.4): Advises practicing phrase timing
-
-### 🔄 Integration Flow
-
-```mermaid
-flowchart TD
-    A[👤 User uploads video<br/>to /v1/feedback-oratoria] --> B[⚙️ Pipeline.py runs<br/>Video + (optional Audio)]
-    B --> C[📊 Metrics + Events<br/>normalized]
-    C --> D[✅ Pydantic Validation<br/>AnalysisJSON]
-    D --> E[📤 Final API JSON Response<br/>with Scores + Recommendations]
-    
-    subgraph B ["Pipeline Execution"]
-        F[🎥 Video Analysis<br/>MediaPipe Models]
-        G[🎙️ Audio Analysis<br/>FFmpeg + VAD]
-    end
-    
-    subgraph C ["Data Processing"]
-        H[📈 Nonverbal Metrics<br/>0-1 normalized]
-        I[⏱️ Verbal Metrics<br/>Pause analysis]
-        J[✋ Gesture Events<br/>Timeline]
-    end
-```
-
-**ASCII Fallback:**
-```
-User Upload → Pipeline.py → Metrics Normalization → Pydantic Validation → Final Response
-                ↓                    ↓                      ↓
-            Video+Audio         Nonverbal+Verbal      AnalysisJSON Schema
-                ↓                    ↓                      ↓
-            MediaPipe+FFmpeg    Normalized [0-1]      Scores+Recommendations
-```
-
-## 🎥 Video Analysis
-
-### Core Technology
-SpeechUp uses **MediaPipe** (Google's computer vision library) to analyze video frames at approximately **10 FPS** for optimal performance:
-
-- **MediaPipe Holistic**: Detects body pose, hand positions, and facial landmarks
-- **MediaPipe FaceMesh**: Provides detailed facial expression analysis with 468 landmark points
-- **MediaPipe Face Detection**: Ensures face visibility and positioning
-
-### Nonverbal Metrics Implemented
-
-#### **Gaze & Attention**
-- `gaze_screen_pct`: Percentage of time looking at the camera (0-1)
-- `head_stability`: Head movement consistency (0-1, higher = more stable)
-
-#### **Posture & Presence**
-- `posture_openness`: Shoulder span and body openness (0-1)
-- `face_coverage_pct`: Percentage of frames where face is visible
-
-#### **Gestures & Movement**
-- `gesture_rate_per_min`: Number of hand gestures per minute
-- `gesture_amplitude`: Average magnitude of hand movements (0-1)
-- `gesture_events`: Timeline of detected gesture moments
-
-#### **Expression & Engagement**
-- `expression_variability`: Facial expression changes over time (0-1)
-- `engagement`: Combined score from gestures and posture (0-1)
-
-### 🔄 Video Pipeline Flow
-
-```mermaid
-flowchart TD
-    A[📹 Video Input] --> B[🔄 Frame Sampling ~10 fps]
-    B --> C[🤖 MediaPipe Holistic + FaceMesh]
-    C --> D[📊 Nonverbal Metrics Extraction]
-    D --> E[🎯 Engagement Calculation]
-    E --> F[✋ Gesture Events Timeline]
-    F --> G[📏 Normalized Metrics (0-1)]
-    G --> H[📤 API JSON Response]
-    
-    subgraph D ["Metrics Extracted"]
-        I[👁️ Gaze & Head Stability]
-        J[🧍 Posture Openness]
-        K[✋ Gesture Rate & Amplitude]
-        L[😊 Expression Variability]
-    end
-```
-
-**ASCII Fallback:**
-```
-Video Input → Frame Sampling → MediaPipe Models → Metrics → Events → Normalized Output → API Response
-                ↓                    ↓              ↓         ↓         ↓
-            ~10 fps           Holistic+FaceMesh  Gaze/Posture  Timeline   [0-1] range
-```
-
-### 🚀 Recent Improvements
-
-- **Warm-up Period**: Eliminates spurious events in the first 0.5 seconds
-- **Gesture Debouncing**: Ensures gestures are detected ≥2 seconds apart
-- **Metric Normalization**: All metrics are clamped to [0,1] range
-- **Engagement Scoring**: Scaled to 0-100 in final scores
-
-## 🎙️ Audio Analysis (MVP)
-
-### Activation
-Audio analysis is **disabled by default** and must be explicitly enabled with the `SPEECHUP_USE_AUDIO=1` environment variable.
-
-### Processing Pipeline
-1. **Audio Extraction**: Uses FFmpeg to convert video to mono 16kHz WAV format
-2. **Voice Activity Detection**: WebRTC VAD identifies speech vs. silence segments
-3. **Pause Analysis**: Computes gaps between speech segments
-
-### Metrics Computed
-- `avg_pause_sec`: Average duration of pauses between speech segments
-- `pause_rate_per_min`: Number of pauses per minute of speech
-
-### ASR Integration (Optional)
-When `SPEECHUP_USE_ASR=1` is enabled, the system also provides:
-- **Transcription**: Full text transcript of speech content
-- **WPM (Words Per Minute)**: Speaking rate calculation
-- **Filler Word Detection**: Spanish filler word identification and counting
-- **Enhanced Recommendations**: Verbal communication tips based on ASR analysis
-
-### 🔄 Audio Pipeline Flow (MVP)
-
-```mermaid
-flowchart TD
-    A[📹 Video Input] --> B[🔧 FFmpeg Extraction → WAV 16kHz]
-    B --> C[🎤 WebRTC VAD - Speech Segments]
-    C --> D[⏱️ Pause Metrics Calculation]
-    D --> E[📊 avg_pause_sec / pause_rate_per_min]
-    E --> F[📤 API JSON Response]
-    
-    subgraph C ["VAD Processing"]
-        G[🎵 Audio Frames<br/>20ms chunks]
-        H[🔍 Speech Detection<br/>Voiced vs Silence]
-        I[📝 Segment Merging<br/>Contiguous speech]
-    end
-```
-
-**ASCII Fallback:**
-```
-Video Input → FFmpeg → WAV 16kHz → WebRTC VAD → Speech Segments → Pause Metrics → API Response
-                ↓           ↓           ↓              ↓               ↓
-            Audio Extract  Mono 16kHz  Voice Detection  Gap Analysis   Pause Stats
-```
-
-### Fallback Behavior
-If audio analysis is disabled or FFmpeg is unavailable:
-- `audio_available` is set to `false`
-- All verbal metrics default to 0.0
-- API continues to function normally with video-only analysis
-
-## 📊 JSON Response Structure
-
-### Complete Response Schema
-```json
-{
-  "scores": {
-    "fluency": 75,
-    "clarity": 82,
-    "pace": 68,
-    "engagement": 79,
-    "delivery_confidence": 85
-  },
-  "verbal": {
-    "wpm": 0.0,
-    "articulation_rate_sps": 0.0,
-    "fillers_per_min": 0.0,
-    "avg_pause_sec": 0.45,
-    "pause_rate_per_min": 12.3,
-    "pronunciation_score": 0.0,
-    "stt_confidence": 0.0
-  },
-  "nonverbal": {
-    "face_coverage_pct": 0.98,
-    "gaze_screen_pct": 0.87,
-    "head_stability": 0.92,
-    "posture_openness": 0.76,
-    "gesture_rate_per_min": 8.5,
-    "gesture_amplitude": 0.68,
-    "expression_variability": 0.73,
-    "engagement": 0.79
-  },
-  "events": [
-    {
-      "t": 2.1,
-      "kind": "gesture",
-      "label": null,
-      "duration": null
-    }
-  ],
-  "recommendations": [
-    {
-      "area": "comunicación",
-      "tip": "Mirá a cámara más seguido para sostener la conexión."
-    },
-    {
-      "area": "presencia",
-      "tip": "Aumentá un poco la amplitud de los gestos para enfatizar ideas."
-    }
-  ],
-  "labels": [
-    "ritmo adecuado",
-    "pocas muletillas",
-    "pausas regulares",
-    "entonación expresiva"
-  ],
-  "quality": {
-    "frames_analyzed": 150,
-    "frames_dropped": 0,
-    "audio_available": true
-  }
-}
-```
-
-### Key Response Sections
-
-#### **Scores (0-100)**
-- **fluency**: Overall speaking smoothness
-- **clarity**: Speech intelligibility and articulation
-- **pace**: Speaking speed appropriateness
-- **engagement**: Nonverbal communication effectiveness
-- **delivery_confidence**: Overall presentation confidence
-
-#### **Verbal Metrics**
-- **avg_pause_sec**: Average pause duration (seconds)
-- **pause_rate_per_min**: Pauses per minute of speech
-- **wpm**: Words per minute (computed from ASR when enabled, with smoothing for videos ≥20s)
-- **fillers_per_min**: Filler words per minute (computed from ASR when enabled)
-- **filler_counts**: Breakdown of specific filler words detected
-- **stt_confidence**: Speech-to-text confidence score (0.0-1.0) based on Whisper decoder probabilities
-- **transcript_short**: First 200 characters of transcript (when ASR enabled)
-- **pronunciation_score**: Placeholder for future enhancement
-
-#### **Nonverbal Metrics (0-1)**
-- **gaze_screen_pct**: Camera eye contact percentage
-- **posture_openness**: Body openness and presence
-- **gesture_amplitude**: Hand movement magnitude
-- **engagement**: Combined nonverbal effectiveness
-
-#### **Events**
-- **t**: Timestamp in seconds
-- **kind**: Event type (currently "gesture")
-- **label**: Event description (future enhancement)
-- **duration**: Event length (future enhancement)
-
-#### **Labels & Recommendations**
-- **Labels**: Human-friendly descriptors (0-5 labels) that summarize key characteristics
-- **Recommendations**: Structured tips with area categorization (3-6 recommendations)
-- Mix of positive reinforcement and constructive improvement suggestions
-- Based on detected metrics and thresholds
-- Currently in Spanish (es-AR) with Argentine Spanish expressions
-
-#### **Quality**
-- **frames_analyzed**: Total frames processed
-- **frames_dropped**: Skipped frames (if any)
-- **audio_available**: Audio processing success flag
-
-## ✅ Current Status
-
-### ✅ Implemented & Stable
-- **Video Analysis**: Full nonverbal metric pipeline with MediaPipe
-- **Audio MVP**: Basic pause detection and analysis
-- **API Schema**: Fully consistent Pydantic validation
-- **Backward Compatibility**: No breaking changes to existing endpoints
-- **Error Handling**: Graceful fallbacks for missing dependencies
-
-### 🔧 Recent Fixes
-- Pydantic validation errors resolved
-- Engagement metric properly propagated
-- Audio availability flag correctly set
-- All scores returned as integers (0-100)
-
-## 🚀 Next Steps & Roadmap
-
-### **Short Term (Next 2-4 weeks)**
-- **✅ Whisper Integration**: Speech-to-text transcription (COMPLETED)
-- **✅ Word-per-Minute**: Calculate actual speaking rate with smoothing for videos ≥20s (COMPLETED)
-- **✅ Enhanced Filler Detection**: Expanded Spanish fillers with accent normalization (COMPLETED)
-- **✅ Transcript Short**: First 200 characters of transcript for privacy-conscious logging (COMPLETED)
-- **Pronunciation Analysis**: Phoneme-level speech quality assessment
-
-### **Medium Term (1-2 months)**
-- **Pronunciation Metrics**: Phoneme-level analysis
-- **Prosody Analysis**: Pitch, energy, and rhythm patterns
-- **Emotion Detection**: Sentiment analysis from voice and face
-
-### **Long Term (3+ months)**
-- **Multi-language Support**: Spanish, English, and more
-- **Real-time Streaming**: WebSocket-based live analysis
-- **Advanced ML Models**: Custom-trained models for specific domains
-
-## 🧪 Testing
-
-### Run All Tests
-```bash
-# Activate virtual environment first
-.\.venv\Scripts\Activate.ps1
-
-# Run tests
-pytest
-```
-
-### Run Specific Test Categories
-```bash
-# Video analysis tests
-pytest tests/test_video_pipeline.py
-
-# API endpoint tests
-pytest tests/test_api.py
-
-# Audio processing tests
-pytest tests/test_audio.py
-```
-
-## 🔧 Configuration
-
-### Environment Variables
-- `SPEECHUP_USE_AUDIO`: Enable audio analysis (default: "1")
-- `SPEECHUP_USE_ASR`: Enable ASR transcription (default: "1")
-- `SPEECHUP_USE_PROSODY`: Enable prosody analysis (default: "1")
-- `SPEECHUP_ASR_MODEL`: Whisper model size (default: "base", options: "tiny", "base", "small", "medium", "large")
-- `SPEECHUP_DEBUG_ASR`: Enable ASR debug logging (default: "0")
-- `SPEECHUP_INCLUDE_TRANSCRIPT`: Include full transcript in response (default: "0")
-- `SPEECHUP_TRANSCRIPT_PREVIEW_MAX`: Max preview length (default: "1200")
-- `SPEECHUP_MAX_EVENTS`: Maximum events to return (default: "100")
-- `SPEECHUP_GESTURE_MIN_AMP`: Minimum gesture amplitude (default: "0.25")
-- `SPEECHUP_GESTURE_MIN_DUR`: Minimum gesture duration (default: "0.10")
-- `SPEECHUP_GESTURE_COOLDOWN`: Gesture cooldown period (default: "0.35")
-- `SPEECHUP_GESTURE_REQUIRE_FACE`: Require face for gesture detection (default: "1")
-- `MEDIAPIPE_USE_GPU`: Force GPU acceleration (default: "1")
-- `LOG_LEVEL`: Logging verbosity (default: "INFO")
-
-### MediaPipe Settings
-- **Model Complexity**: Configurable (0=light, 1=full, 2=heavy)
-- **Detection Confidence**: Minimum confidence thresholds
-- **Tracking Confidence**: Minimum tracking thresholds
-
-## 📚 API Documentation
-
-Once the server is running, visit:
-- **Interactive API Docs**: `http://localhost:8000/docs`
-- **ReDoc Documentation**: `http://localhost:8000/redoc`
-- **OpenAPI Schema**: `http://localhost:8000/openapi.json`
-
-## 🤝 Contributing
-
-### Development Setup
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add/update tests
-5. Ensure all tests pass
-6. Submit a pull request
-
-### Code Style
-- Follow PEP 8 guidelines
-- Use type hints where possible
-- Add docstrings to new functions
-- Run pre-commit hooks before committing
-
-## 📄 License
-
-[Add your license information here]
-
-## 🆘 Support
-
-### Common Issues
-- **FFmpeg not found**: Ensure FFmpeg is installed and in PATH
-- **MediaPipe errors**: Check GPU drivers and CUDA installation
-- **Memory issues**: Reduce video resolution or frame rate
-
-### Getting Help
-- Check existing issues on GitHub
-- Create a new issue with detailed error information
-- Include video sample and system specifications
+## TL;DR
+- **Endpoint:** `POST /v1/feedback-oratoria` (multipart or JSON with media reference)
+- **Default:** full analysis ON (audio + ASR + prosody + video/gestures)
+- **Output:** scores (0–100), verbal & prosody metrics, nonverbal metrics, labels, recommendations, events[]
 
 ---
 
-**SpeechUp-IA** - Making better speakers, one video at a time! 🎤✨
+## Project Layout
+```
+├─ api/
+│ ├─ main.py # FastAPI app bootstrap, default-on feature flags, logging
+│ ├─ routers/
+│ │ └─ oratory.py # /v1/feedback-oratoria endpoint integration
+│ ├─ schemas/
+│ │ └─ analysis_json.py # Pydantic model for the response (labels[], recommendations[])
+│ ├─ core/
+│ │ ├─ logging.py # JSON/text logging config
+│ │ └─ middleware.py # request/response middleware
+│ ├─ services/
+│ │ └─ video_processor.py # video processing service layer
+│ └─ websockets/ # real-time analysis support
+│
+├─ video/
+│ ├─ pipeline.py # end-to-end pipeline orchestrating audio+video analysis
+│ ├─ metrics.py # payload assembly, scores/labels/advice integration
+│ ├─ scoring.py # dynamic scoring across 6 dimensions (0–100)
+│ ├─ advice_generator.py # human-friendly labels + recommendations (es-AR)
+│ ├─ audio_utils.py # audio extraction, VAD, pause metrics
+│ ├─ realtime.py # real-time analysis pipeline
+│ ├─ extract_frames.py # frame extraction utilities
+│ └─ analysis/ # MediaPipe analysis modules
+│
+├─ audio/
+│ ├─ asr.py # Whisper-based ASR + confidence & transcript short/full
+│ ├─ prosody.py # pitch/energy/rhythm metrics using Librosa
+│ ├─ text_metrics.py # WPM, filler detection, normalizations
+│ ├─ audio_utils.py # WebRTC VAD + fallback energy-based segmentation
+│ ├─ emotion.py # emotion detection from voice (experimental)
+│ ├─ speech.py # speech processing utilities
+│ └─ processors.py # audio processing pipeline
+│
+├─ utils/ # utility modules
+├─ core/ # core functionality
+├─ config.py # configuration management
+├─ app.py # legacy app entry point
+│
+├─ tests/
+│ ├─ demo_asr.py # smoke test ASR on sample video
+│ ├─ demo_prosody.py # smoke test prosody on sample video
+│ ├─ collect_all_metrics.py # batch metrics dump for test clips
+│ ├─ test_labels.py # advice/labels unit tests
+│ ├─ test_feature_flags.py # default-on flags coverage
+│ ├─ test_prosody_integration.py # prosody pipeline tests
+│ └─ sample*.mp4 # test video files
+│
+├─ model-es/ # Spanish language models (if present)
+├─ cache/ # analysis result caching
+├─ fixtures/ # test data and examples
+├─ README.md
+└─ requirements.txt
+```
+
+---
+
+## Models & Why We Chose Them
+
+### **🎤 ASR: OpenAI Whisper (`base` model)**
+- **What it does**: Transcribes speech to text with high accuracy in Spanish
+- **Why we chose it**: 
+  - Excellent Spanish language support (es-AR)
+  - CPU-optimized (`base` model: 74MB, fast inference)
+  - Stable API with confidence scores
+  - No internet connection required (offline processing)
+- **How we use it**: 
+  - Extracts full transcript and `transcript_short` (preview)
+  - Computes `stt_confidence` from decoder probabilities as pronunciation proxy
+  - Enables WPM calculation and Spanish filler word detection
+  - Configurable via `SPEECHUP_ASR_MODEL` environment variable
+
+### **🎵 Prosody: Librosa + Custom DSP Pipeline**
+- **What it does**: Analyzes pitch variation, energy dynamics, and speech rhythm
+- **Why we chose it**:
+  - **Librosa**: Industry-standard audio analysis library with robust F0 estimation
+  - **Custom pipeline**: Lightweight, deterministic, no heavy ML dependencies
+  - **CPU-friendly**: Optimized for real-time processing on laptops
+- **How we use it**:
+  - **Pitch tracking**: `librosa.pyin` for robust fundamental frequency (F0) estimation
+  - **Energy analysis**: RMS energy variation across audio frames
+  - **Rhythm consistency**: Regularity of voiced/pause timing patterns
+  - **Pre-filtering**: High-pass filter (80Hz) + spectral gating for noise reduction
+
+### **👁️ Nonverbal: MediaPipe (TensorFlow Lite)**
+- **What it does**: Detects face landmarks, body pose, hand positions, and facial expressions
+- **Why we chose it**:
+  - **Google's solution**: Production-ready, well-maintained, cross-platform
+  - **TFLite runtime**: Fast CPU inference, no GPU required
+  - **Comprehensive models**: Holistic (pose+hands), FaceMesh (468 landmarks), Face Detection
+  - **Real-time capable**: 10+ FPS on typical laptop hardware
+- **How we use it**:
+  - **Face detection**: Ensures face visibility and positioning
+  - **Landmark tracking**: 468 facial points for expression analysis
+  - **Pose estimation**: Shoulder span for posture openness
+  - **Hand tracking**: Motion magnitude for gesture detection
+
+### **🔊 Voice Activity Detection: WebRTC VAD + Librosa Fallback**
+- **What it does**: Separates speech from silence to compute pause metrics
+- **Why we chose it**:
+  - **WebRTC VAD**: Google's production VAD, highly accurate for speech detection
+  - **Librosa fallback**: Energy-based segmentation when WebRTC fails
+  - **Robust**: Handles noisy environments and varying audio quality
+- **How we use it**:
+  - **Primary**: WebRTC VAD with configurable aggressiveness
+  - **Fallback**: Librosa energy-based segmentation with spectral analysis
+  - **Output**: Speech segments → pause duration, pause rate, long pause detection
+
+### **🎬 Video Processing: OpenCV + NumPy**
+- **What it does**: Frame extraction, motion analysis, and gesture windowing
+- **Why we chose it**:
+  - **OpenCV**: Industry standard for computer vision, excellent Python bindings
+  - **NumPy**: Fast numerical operations for motion magnitude calculations
+  - **Cross-platform**: Works on Windows, macOS, and Linux
+- **How we use it**:
+  - **Frame extraction**: Sampled at ~10 FPS for performance
+  - **Motion analysis**: Hand/body motion magnitude over time
+  - **Gesture detection**: Hysteresis state machine with configurable thresholds
+
+### **🔄 Audio Extraction: FFmpeg**
+- **What it does**: Converts video to 16kHz mono WAV for audio analysis
+- **Why we chose it**:
+  - **Industry standard**: Most reliable audio/video conversion tool
+  - **Format support**: Handles virtually any video format
+  - **Quality**: Maintains audio fidelity during conversion
+- **How we use it**:
+  - **Format conversion**: Video → 16kHz mono WAV (optimal for speech analysis)
+  - **Segment trimming**: Extracts specific time windows for analysis
+  - **Error handling**: Graceful fallback if conversion fails
+
+---
+
+## Feature Flags (Default ON)
+
+Flags are read via `_flag()` (default_on=True). If not set, they resolve to **True**.
+
+- `SPEECHUP_USE_AUDIO` = 1 (extract audio + VAD)
+- `SPEECHUP_USE_ASR` = 1 (Whisper transcription, WPM, fillers)
+- `SPEECHUP_USE_PROSODY` = 1 (pitch/energy/rhythm)
+
+**Gesture tuning (optional):**
+- `SPEECHUP_GESTURE_MIN_AMP` (default `0.18`)
+- `SPEECHUP_GESTURE_MIN_DUR` (default `0.08`)
+- `SPEECHUP_GESTURE_COOLDOWN` (default `0.25`)
+- `SPEECHUP_GESTURE_HYST_LOW_MULT` (default `0.55`)
+- `SPEECHUP_GESTURE_MAX_SEG_S` (default `2.5`)
+- `SPEECHUP_GESTURE_REQUIRE_FACE` (default `1`)
+
+**Transcript controls (optional):**
+- `SPEECHUP_INCLUDE_TRANSCRIPT` (default `0`)
+- `SPEECHUP_TRANSCRIPT_PREVIEW_MAX` (default `1200` chars)
+
+---
+
+## End-to-End Flow
+
+1) **API receive** (FastAPI)
+   - `POST /v1/feedback-oratoria` → saves media and calls `video.pipeline.run_analysis_pipeline()`.
+
+2) **Video pipeline**
+   - Extract frames, detect face/landmarks, compute:
+     - gaze %, head stability, posture openness, expression variability
+     - gesture windows via **hysteresis state machine** + cooldown; events[] with {t, end_t, duration, amplitude, frame, confidence}
+   - Extract audio (FFmpeg → 16k mono WAV)
+     - VAD segments → pause metrics
+     - Prosody → pitch/energy/rhythm
+     - ASR (Whisper base) → transcript, WPM, fillers, stt_confidence
+
+3) **Metrics → Scores → Labels/Advice**
+   - `video/scoring.py`: 6 scores (0–100):
+     - Fluency, Clarity, Delivery Confidence, Pronunciation, Pace, Engagement
+   - `video/advice_generator.py`: labels[] + Spanish tips (balanced, deduplicated).
+   - `video/metrics.py`: assemble final JSON, propagate `quality.debug` diagnostics.
+
+---
+
+## Technical Implementation Details
+
+### **🎯 Core Architecture Principles**
+- **Modular Design**: Each component (ASR, prosody, nonverbal) can be enabled/disabled independently
+- **Graceful Degradation**: If one analysis fails, others continue and return safe defaults
+- **Performance First**: Optimized for CPU-only laptops with real-time feedback
+- **Spanish-First**: Tailored for es-AR speakers with appropriate thresholds and language support
+
+### **⚡ Performance Optimizations**
+- **Frame Sampling**: Video analyzed at ~10 FPS (vs 30+ FPS) for 3x speed improvement
+- **Audio Windowing**: ASR limited to first 20s by default (configurable via `SPEECHUP_ASR_MAX_WINDOW_SEC`)
+- **Model Selection**: Auto-selects optimal Whisper model based on device (CPU: `base`, GPU: `small`)
+- **Caching**: Analysis results cached to avoid re-processing identical videos
+
+### **🔧 Robustness Features**
+- **Multi-Fallback VAD**: WebRTC VAD → Librosa energy → safe defaults
+- **Gesture Hysteresis**: Prevents false positives with configurable amplitude/duration thresholds
+- **Error Isolation**: ASR failures don't crash prosody analysis, prosody failures don't crash nonverbal
+- **Input Validation**: Comprehensive Pydantic schemas ensure API response consistency
+
+### **🌍 Language & Cultural Adaptation**
+- **Spanish Fillers**: Detects "este", "eh", "o sea", "bueno", "mira" with accent normalization
+- **WPM Thresholds**: Optimized for Spanish speaking patterns (120-160 WPM ideal range)
+- **Advice Generation**: Argentine Spanish expressions and cultural context
+- **Metric Tuning**: Thresholds calibrated for Spanish speech characteristics
+
+---
+
+## Metrics — Exact Definitions
+
+### Verbal (audio/text)
+- **WPM**: `words / (speech_duration_sec / 60)`  
+  speech_duration_sec = sum of VAD speech segments.
+- **Articulation rate (sps)**: `WPM * 2.3 / 60`  
+  (2.3 ≈ avg Spanish syllables per word).
+- **Fillers per min**: count of Spanish fillers (heuristic) normalized by speech minutes.
+- **Avg pause (sec)**: mean duration of non-speech gaps between VAD segments.
+- **Pause rate (/min)**: number of pauses ≥ 0.2–0.3s per minute (tuned with VAD).
+- **Long pauses**: gaps ≥ `LONG_PAUSE_S` (default 0.8s) as `{start,end,duration}`.
+- **Pronunciation score**: `stt_confidence` in `[0,1]` derived from Whisper segment stats.
+- **Transcript**: `transcript_short` (preview), `transcript_full` optional by flag.
+
+### Prosody
+- **pitch_mean_hz**: average F0 over voiced frames.
+- **pitch_range_semitones**: range(F0) mapped to semitones.
+- **pitch_cv**: coefficient of variation of F0 (std/mean).
+- **energy_cv**: coefficient of variation of short-term energy.
+- **rhythm_consistency**: regularity of voiced/pause timing (0–1).
+
+### Nonverbal (video)
+- **gaze_screen_pct**: % frames with gaze toward camera/screen (proxy via facial orientation).
+- **head_stability**: 1 − normalized landmark jitter; closer to 1 = steadier head.
+- **posture_openness**: normalized shoulder/torso openness (0–1).
+- **expression_variability**: variance of facial change over time (0–1).
+- **gesture_rate_per_min**: `#confirmed_gesture_events / duration_min`  
+  Events built by **hysteresis windowing**:
+  - open when amplitude ≥ MIN_AMP; close when amplitude < HYST_LOW
+  - enforce `MIN_DUR_S` ≤ duration ≤ `MAX_SEG_S`
+  - apply time cooldown between starts
+  - each event stores `{t, end_t, duration, amplitude, frame, confidence}`.
+
+### Labels & Recommendations
+- Deterministic thresholds → labels (e.g., "ritmo adecuado", "pausas regulares", "gestualidad activa", "bajo contraste de energía").
+- Advice generator:
+  - positive + constructive mix, es-AR phrasing
+  - deduplication and area balancing (voz / comunicación / presencia)
+  - caps on max labels/tips.
+
+---
+
+## Scores (0–100)
+
+High-level (details in `video/scoring.py`):
+- **Fluency**: WPM band + low fillers + regular pauses.
+- **Pace**: target 120–160 WPM; penalize slow/fast.
+- **Pronunciation**: `stt_confidence * 100`, clamped.
+- **Clarity**: low fillers + stable pauses + decent gaze.
+- **Engagement**: gestures/min + expression variability (+ small face coverage effect).
+- **Delivery Confidence**: head stability + gaze (+ small prosody bonus if rhythm ≥ 0.5).
+
+All scores are clamped to `[0,100]`.
+
+---
+
+## Run Locally
+
+### 1) Install
+```bash
+python -m venv .venv
+# Windows PowerShell:
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+FFmpeg must be available on PATH for audio extraction.
+
+### 2) Start API (defaults ON)
+```bash
+# Optional: tune gestures while testing
+$env:SPEECHUP_GESTURE_MIN_AMP="0.18"
+$env:SPEECHUP_GESTURE_COOLDOWN="0.25"
+
+uvicorn api.main:app --reload
+```
+You should see:
+```
+FEATURES -> USE_AUDIO=True USE_ASR=True USE_PROSODY=True
+```
+
+### 3) Test with a video
+
+Postman → POST http://127.0.0.1:8000/v1/feedback-oratoria
+
+Body: form-data with key `file` = your mp4
+
+### 4) Smoke tests
+```bash
+python -m tests.demo_asr tests\sample2.mp4
+python -m tests.demo_prosody tests\sample2.mp4
+python -m tests.collect_all_metrics
+```
+
+---
+
+## Troubleshooting
+
+**ASR 0s?** Check logs for "ASR ok" vs "ASR failed". Set `$env:SPEECHUP_DEBUG_ASR="1"`.
+
+**Few gestures?** Lower `SPEECHUP_GESTURE_MIN_AMP` (e.g., 0.16), reduce cooldown (0.20), or temporarily `SPEECHUP_GESTURE_REQUIRE_FACE=0`.
+
+**Prosody zeros?** Confirm audio extracted and VAD segments found.
+
+---
+
+## License & Notes
+
+Internal MVP for demo; thresholds and weights are tuned for Spanish speaking and typical laptop cameras on CPU. Model choices favor easy deployment and stable CPU performance.
+
+---
+
+## Changelog (MVP highlights)
+
+- Default-ON feature gating (audio/ASR/prosody).
+- Real ASR in pipeline; scoring driven by metrics (no hardcodes).
+- Prosody: pitch/energy/rhythm with safe fallbacks.
+- Gesture detection: hysteresis windowing + cooldown + max segment.
+- Advice system: labels + diversified tips (es-AR), deduped and balanced.
+- Diagnostics: per-stage timings, bucketed gesture coverage, long pauses, etc.
+
+---
+
+## Contact
+
+Team SpeechUp-IA — reach out in the repo issues/PRs with clips and logs for tuning.

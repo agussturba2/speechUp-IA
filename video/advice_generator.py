@@ -79,6 +79,9 @@ class AdviceGenerator:
         labels = labels[:5]
         recommendations = recommendations[:6]
         
+        # Apply deduplication and balancing
+        recommendations = self._balance_and_dedupe(recommendations, labels)
+        
         return labels, recommendations
 
     def _analyze_wpm(self, verbal: Dict) -> Tuple[List[str], List[Dict]]:
@@ -305,3 +308,73 @@ class AdviceGenerator:
                 "Practica frente a un espejo para mejorar presencia y postura visual."
             )
         return " ".join(advice_parts)
+
+    def _norm_key(self, txt: str) -> str:
+        """Normalize text for deduplication comparison."""
+        return " ".join(txt.lower().split())
+
+    def _balance_and_dedupe(self, advice: List[Dict], labels: List[str]) -> List[Dict]:
+        """
+        Deduplicate advice and balance across areas to ensure variety.
+        
+        Args:
+            advice: List of advice dictionaries with {area, tip}
+            labels: List of current labels for context-aware filtering
+            
+        Returns:
+            Balanced and deduplicated list of advice
+        """
+        import os
+        
+        seen = set()
+        out = []
+        by_area = {"voz": 0, "comunicación": 0, "presencia": 0, "communication": 0}
+        
+        # Check if energy-related labels are already present
+        energy_labels = {"bajo contraste de energía", "entonación plana"}
+        energy_already = any(l in labels for l in energy_labels)
+        energy_tip_kept = False
+        
+        for a in advice:
+            # Create deduplication key
+            key = f'{a.get("area", "")}|{self._norm_key(a.get("tip", ""))}'
+            if key in seen:  # exact duplicate
+                continue
+                
+            # Allow at most 2 tips per area
+            area = a.get("area", "")
+            if by_area.get(area, 0) >= 2:
+                continue
+                
+            # If energy label is present, keep only ONE energy-related tip
+            tip_txt = a.get("tip", "").lower()
+            is_energy_tip = ("energ" in tip_txt) or ("tono" in tip_txt) or ("entonación" in tip_txt)
+            if energy_already and is_energy_tip:
+                if energy_tip_kept:
+                    continue
+                energy_tip_kept = True
+            
+            # Add to output
+            seen.add(key)
+            by_area[area] = by_area.get(area, 0) + 1
+            out.append(a)
+        
+                    # If we ended with too few areas represented, back-fill with variety
+            want = int(os.getenv("SPEECHUP_ADVICE_TARGET_COUNT", "5"))
+            if len(out) < want:
+                fillers = [
+                    {"area": "comunicación", "tip": "Usá ejemplos concretos para que la idea quede más clara."},
+                    {"area": "presencia", "tip": "Sostené los gestos a lo largo de todo el mensaje, no solo al inicio."},
+                    {"area": "voz", "tip": "Marcá palabras clave con una leve pausa antes o después."},
+                ]
+                for f in fillers:
+                    if len(out) >= want:
+                        break
+                    k = f'{f["area"]}|{self._norm_key(f["tip"])}'
+                    # Check if we can add this filler without exceeding area limits
+                    if k not in seen and by_area.get(f["area"], 0) < 2:
+                        out.append(f)
+                        seen.add(k)
+                        by_area[f["area"]] = by_area.get(f["area"], 0) + 1
+        
+        return out[:want]

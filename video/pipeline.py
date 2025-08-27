@@ -207,18 +207,32 @@ def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
         b0 = int(ts // 5) * 5
         return f"{b0}-{b0+5}"
     
-    # Gesture tracking variables
+    # Gesture detection parameters with hysteresis
+    MIN_AMP = float(os.getenv("SPEECHUP_GESTURE_MIN_AMP", "0.18"))
+    MIN_DUR_S = float(os.getenv("SPEECHUP_GESTURE_MIN_DUR", "0.08"))
+    COOLDOWN_S = float(os.getenv("SPEECHUP_GESTURE_COOLDOWN", "0.25"))
+    REQUIRE_FACE = os.getenv("SPEECHUP_GESTURE_REQUIRE_FACE", "1").lower() in ("1", "true", "True", "yes", "on")
+    MAX_EVENTS = int(os.getenv("SPEECHUP_MAX_EVENTS", "200"))
+    HYST_LOW_MULT = float(os.getenv("SPEECHUP_GESTURE_HYST_LOW_MULT", "0.55"))
+    HYST_LOW = HYST_LOW_MULT * MIN_AMP  # Hysteresis low threshold
+    MAX_SEG_S = float(os.getenv("SPEECHUP_GESTURE_MAX_SEG_S", "2.5"))  # Safety max segment length
+    LONG_PAUSE_S = float(os.getenv("SPEECHUP_LONG_PAUSE_SEC", "0.8"))
+    
+    # Gesture state machine variables
+    gesture_active = False
+    gesture_start_idx = -1
+    gesture_face_hits = 0
+    gesture_sum_amp = 0.0
+    gesture_n_amp = 0
+    gesture_last_end_t = float("-inf")
     gesture_candidates = 0
     confirmed_events = []
     gesture_buckets = {}
-    last_end_t = float("-inf")
     
-    # Gesture windowing FSM state
-    gesture_state = "idle"
-    win_start_t = 0.0
-    win_start_frame = 0
-    amp_peak = 0.0
-    low_amp_frames = 0
+    # Motion magnitude tracking for gesture detection
+    motion_magnitudes = []  # per-frame motion magnitude
+    face_presence = []      # per-frame face presence
+    frame_timestamps = []   # per-frame timestamps
     
     # Initialize events list for real-time gesture detection (backward compat)
     events = []
@@ -297,76 +311,112 @@ def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
                 # Compute current time in seconds for this frame
                 t_sec = idx / (fps or 30.0)
                 
-                # Gesture windowing FSM
+                # Store motion magnitude and face presence for gesture detection
+                motion_magnitudes.append(delta)
+                face_presence.append(bool(face_res.detections))
+                frame_timestamps.append(t_sec)
+                
+                # Gesture hysteresis state machine
                 if t_sec >= WARMUP_SEC:
-                    # State machine for gesture detection
-                    if gesture_state == "idle":
+                    if not gesture_active:
                         # Check if we should start a new gesture window
-                        if delta > GESTURE_MIN_AMPLITUDE:
-                            gesture_state = "active"
-                            win_start_t = t_sec
-                            win_start_frame = idx
-                            amp_peak = delta
-                            low_amp_frames = 0
-                    elif gesture_state == "active":
-                        # Update peak amplitude
-                        amp_peak = max(amp_peak, delta)
+                        if delta >= MIN_AMP and (t_sec - gesture_last_end_t) >= COOLDOWN_S:
+                            # Open window
+                            gesture_active = True
+                            gesture_start_idx = idx
+                            gesture_face_hits = 1 if bool(face_res.detections) else 0
+                            gesture_sum_amp = delta
+                            gesture_n_amp = 1
+                    else:
+                        # Accumulate in active window
+                        gesture_face_hits += 1 if bool(face_res.detections) else 0
+                        gesture_sum_amp += delta
+                        gesture_n_amp += 1
                         
-                        # Check if we should close the window
-                        if delta < (GESTURE_MIN_AMPLITUDE * 0.6):
-                            low_amp_frames += 1
-                        else:
-                            low_amp_frames = 0
-                        
-                        # Close window conditions: low amplitude for N frames OR hard timeout
-                        should_close = (
-                            low_amp_frames >= 3 or  # 3 frames below threshold
-                            (t_sec - win_start_t) >= 2.0  # Hard timeout at 2s
-                        )
-                        
-                        if should_close:
-                            # Window closed - compute duration and check filters
-                            window_duration = t_sec - win_start_t
-                            
-                            # Record candidate (for diagnostics)
+                        # Check if we should close the window (hysteresis)
+                        if delta < HYST_LOW:
+                            # Close window - process candidate
                             gesture_candidates += 1
+                            end_idx = min(idx, gesture_start_idx + int(MAX_SEG_S * (fps or 30.0)) - 1)
+                            duration = (end_idx - gesture_start_idx + 1) / (fps or 30.0)
                             
-                            # Check face presence requirement for gestures
-                            face_present = bool(face_res.detections)
+                            if duration >= MIN_DUR_S:
+                                # Face ratio check at decision time
+                                if not REQUIRE_FACE or (gesture_face_hits / max(1, gesture_n_amp)) >= 0.5:
+                                    start_t = gesture_start_idx / (fps or 30.0)
+                                    end_t = (end_idx + 1) / (fps or 30.0)
+                                    mean_amp = gesture_sum_amp / max(1, gesture_n_amp)
+                                    
+                                    # Duration warning for debugging
+                                    if duration > MAX_SEG_S + 0.05:
+                                        logger.warning("Long gesture segment detected: %.2fs (start=%.1fs, end=%.1fs)", 
+                                                     duration, start_t, end_t)
+                                    
+                                    # Confidence normalized above MIN_AMP
+                                    conf = max(0.0, min(1.0, (mean_amp - MIN_AMP) / max(1e-6, (0.9 - MIN_AMP))))
+                                    
+                                    confirmed_events.append({
+                                        "t": float(start_t),            # backward compatibility
+                                        "end_t": float(end_t),
+                                        "duration": float(end_t - start_t),
+                                        "frame": int(gesture_start_idx),
+                                        "kind": "gesture",
+                                        "label": "hand_motion",
+                                        "amplitude": float(mean_amp),
+                                        "score": None,
+                                        "confidence": float(conf),
+                                    })
+                                    
+                                    # Update tracking
+                                    gesture_last_end_t = end_t
+                                    
+                                    # Update bucket counts
+                                    bucket_key = _bucket_key(start_t)
+                                    gesture_buckets[bucket_key] = gesture_buckets.get(bucket_key, 0) + 1
                             
-                            # Apply filters: duration, amplitude, cooldown, and face requirement
-                            if (window_duration >= GESTURE_MIN_DURATION and 
-                                amp_peak >= GESTURE_MIN_AMPLITUDE and
-                                (win_start_t - last_end_t) >= GESTURE_COOLDOWN_S and
-                                (not REQUIRE_FACE_FOR_GEST or face_present)):
-                                
-                                # Create confirmed event
-                                event = {
-                                    "t": float(win_start_t),  # start time (backward compat)
-                                    "kind": "gesture",
-                                    "label": "hand_motion",
-                                    "duration": float(window_duration),
-                                    "amplitude": float(amp_peak),
-                                    "end_t": float(t_sec),
-                                    "frame": int(idx),
-                                    "confidence": None
-                                }
-                                confirmed_events.append(event)
-                                
-                                # Update tracking
-                                last_end_t = t_sec
-                                gesture_events += 1
-                                
-                                # Update bucket counts
-                                bucket_key = _bucket_key(win_start_t)
-                                gesture_buckets[bucket_key] = gesture_buckets.get(bucket_key, 0) + 1
-                            
-                            # Reset to idle state
-                            gesture_state = "idle"
+                            # Reset window state
+                            gesture_active = False
+                            gesture_start_idx = -1
+                            gesture_face_hits = 0
+                            gesture_sum_amp = 0.0
+                            gesture_n_amp = 0
                     
             prev_hands = hands
 
     cap.release()
+    
+    # Process any remaining active gesture window
+    if gesture_active:
+        # Close final window with same logic
+        gesture_candidates += 1
+        end_idx = min(idx - 1, gesture_start_idx + int(MAX_SEG_S * (fps or 30.0)) - 1)  # Safety max
+        duration = (end_idx - gesture_start_idx + 1) / (fps or 30.0)
+        
+        if duration >= MIN_DUR_S:
+            # Face ratio check at decision time
+            if not REQUIRE_FACE or (gesture_face_hits / max(1, gesture_n_amp)) >= 0.5:
+                start_t = gesture_start_idx / (fps or 30.0)
+                end_t = (end_idx + 1) / (fps or 30.0)
+                mean_amp = gesture_sum_amp / max(1, gesture_n_amp)
+                
+                # Confidence normalized above MIN_AMP
+                conf = max(0.0, min(1.0, (mean_amp - MIN_AMP) / max(1e-6, (0.9 - MIN_AMP))))
+                
+                confirmed_events.append({
+                    "t": float(start_t),            # backward compatibility
+                    "end_t": float(end_t),
+                    "duration": float(end_t - start_t),
+                    "frame": int(gesture_start_idx),
+                    "kind": "gesture",
+                    "label": "hand_motion",
+                    "amplitude": float(mean_amp),
+                    "score": None,
+                    "confidence": float(conf),
+                })
+                
+                # Update bucket counts
+                bucket_key = _bucket_key(start_t)
+                gesture_buckets[bucket_key] = gesture_buckets.get(bucket_key, 0) + 1
 
     # Compute derived metrics
     mean_face_center_dist = face_center_dist_sum / max(frames_with_face, 1)
@@ -388,6 +438,11 @@ def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
         "frames_with_face": frames_with_face,
         "frames_total": frames_total
     }
+    
+    # Calculate coverage percentage across 5-second buckets
+    total_buckets = max(1, int(duration_sec // 5) + 1)
+    buckets_with_events = sum(1 for count in gesture_buckets.values() if count > 0)
+    coverage_pct = (buckets_with_events / total_buckets) * 100.0
     
     # Gesture rate per minute (for backward compatibility)
     gesture_rate_per_min = gesture_stats["rate_per_min"]
@@ -610,6 +665,29 @@ def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
                             
                             logger.info("ASR ok: dur=%.2fs wpm=%.1f stt_conf=%.2f", dur, wpm, proc["verbal"]["stt_confidence"])
                             
+                            # Fill missing verbal metrics
+                            syll_per_word_es = 2.3  # Spanish average syllables per word
+                            proc["verbal"]["articulation_rate_sps"] = float(max(0.0, (wpm * syll_per_word_es) / 60.0))
+                            proc["verbal"]["pronunciation_score"] = float(max(0.0, min(1.0, proc["verbal"].get("stt_confidence", 0.0))))
+                            
+                            # Derive long_pauses from VAD segments
+                            if segments and len(segments) > 1:
+                                long_pauses = []
+                                for i in range(len(segments) - 1):
+                                    gap_start = segments[i].get("end", 0.0)
+                                    gap_end = segments[i + 1].get("start", 0.0)
+                                    gap_duration = gap_end - gap_start
+                                    
+                                    if gap_duration >= LONG_PAUSE_S:
+                                        long_pauses.append({
+                                            "start": float(gap_start),
+                                            "end": float(gap_end),
+                                            "duration": float(gap_duration)
+                                        })
+                                
+                                if long_pauses:
+                                    proc["verbal"]["long_pauses"] = long_pauses
+                            
                             # Apply WPM smoothing for videos >= 20s
                             if duration_sec >= 20.0:
                                 # For longer videos, apply 3-point moving average smoothing
@@ -686,27 +764,43 @@ def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
         "gesture_candidates_total": gesture_candidates,
         "gesture_events_returned": min(len(confirmed_events), MAX_EVENTS),
         "gesture_buckets_5s": gesture_buckets,
+        "coverage_pct": float(coverage_pct),
         "last_frame_ts": float(duration_sec),
         "face_present_ratio": float(frames_with_face) / max(frames_total, 1),
         "frames_with_face": gesture_stats["frames_with_face"],
         "max_events_config": MAX_EVENTS,
         "gesture_params": {
-            "min_amp": GESTURE_MIN_AMPLITUDE,
-            "min_dur": GESTURE_MIN_DURATION,
-            "cooldown": GESTURE_COOLDOWN_S,
-            "require_face": REQUIRE_FACE_FOR_GEST
+            "min_amp": MIN_AMP,
+            "min_dur": MIN_DUR_S,
+            "cooldown": COOLDOWN_S,
+            "require_face": REQUIRE_FACE,
+            "hyst_low": HYST_LOW,
+            "hyst_low_mult": HYST_LOW_MULT,
+            "max_seg_s": MAX_SEG_S
         }
     })
     
     # Log gesture detection summary
     last_event_time = max([e.get("end_t", 0.0) for e in confirmed_events], default=0.0)
     logger.info(
-        "GESTURES -> total=%d, candidates=%d, rate=%.2f/min, last_event=%.1fs, face_ratio=%.3f",
+        "GESTURES -> total=%d, candidates=%d, rate=%.2f/min, coverage=%.1f%%, last_event=%.1fs",
         len(confirmed_events),
         gesture_candidates,
         gesture_stats["rate_per_min"],
-        last_event_time,
-        float(frames_with_face) / max(frames_total, 1)
+        coverage_pct,
+        last_event_time
+    )
+    
+    # Log gesture parameters
+    logger.info(
+        "GESTURE PARAMS -> min_amp=%.3f, low=%.3f (%.2fx), min_dur=%.3fs, cooldown=%.3fs, max_seg=%.1fs, require_face=%s",
+        MIN_AMP,
+        HYST_LOW,
+        HYST_LOW_MULT,
+        MIN_DUR_S,
+        COOLDOWN_S,
+        MAX_SEG_S,
+        REQUIRE_FACE
     )
     
     logger.info("Total pipeline time: %.1f ms", (time.time() - t0) * 1000)
