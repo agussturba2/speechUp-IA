@@ -1,0 +1,1022 @@
+# video/pipeline.py
+import logging
+import os
+import time
+import math
+from typing import Dict, Any, List, Tuple, Optional, Union, Callable
+from functools import lru_cache
+
+import cv2
+import numpy as np
+import mediapipe as mp
+
+# Audio processing imports
+from .audio_utils import extract_wav_mono_16k, compute_vad_segments, compute_pause_metrics
+from .scoring import compute_scores
+from audio.asr import transcribe_wav
+from audio.text_metrics import compute_wpm, detect_spanish_fillers, normalize_fillers_per_minute
+from audio.prosody import compute_prosody_metrics
+
+logger = logging.getLogger(__name__)
+
+# Configuration management - centralized constants
+class Config:
+    """
+    Centralized configuration management for pipeline parameters.
+    
+    This class provides a single source of truth for all configurable parameters
+    used throughout the video analysis pipeline, including gesture detection thresholds,
+    audio processing settings, and feature flags.
+    """
+    
+    # Gesture detection parameters
+    GESTURE_MIN_AMP: float = float(os.getenv("SPEECHUP_GESTURE_MIN_AMP", "0.22"))
+    GESTURE_MIN_DUR: float = float(os.getenv("SPEECHUP_GESTURE_MIN_DUR", "0.10"))
+    GESTURE_COOLDOWN_S: float = float(os.getenv("SPEECHUP_GESTURE_COOLDOWN", "0.30"))
+    REQUIRE_FACE_FOR_GEST: bool = os.getenv("SPEECHUP_GESTURE_REQUIRE_FACE", "1") in ("1", "true", "True", "yes", "on")
+    WARMUP_SEC: float = 0.5  # ignore first 0.5s
+    MIN_EVENT_GAP_SEC: float = GESTURE_COOLDOWN_S  # use configurable cooldown
+    HYST_LOW_MULT: float = float(os.getenv("SPEECHUP_GESTURE_HYST_LOW_MULT", "0.55"))
+    HYST_LOW: float = HYST_LOW_MULT * GESTURE_MIN_AMP  # Hysteresis low threshold
+    MAX_SEG_S: float = float(os.getenv("SPEECHUP_GESTURE_MAX_SEG_S", "2.5"))  # Safety max segment length
+    LONG_PAUSE_S: float = float(os.getenv("SPEECHUP_LONG_PAUSE_SEC", "0.8"))
+    MAX_EVENTS: int = int(os.getenv("SPEECHUP_MAX_EVENTS", "200"))
+    
+    # Transcript configuration
+    INCLUDE_FULL_TRANSCRIPT: bool = os.getenv("SPEECHUP_INCLUDE_TRANSCRIPT", "0") in ("1", "true", "True", "yes", "on")
+    TRANSCRIPT_PREVIEW_MAX: int = int(os.getenv("SPEECHUP_TRANSCRIPT_PREVIEW_MAX", "1200"))
+    
+    # Feature flags
+    @staticmethod
+    def flag(name: str, default_on: bool = True) -> bool:
+        """
+        Read feature flag from environment variable with safe defaults and cast to boolean.
+        
+        Args:
+            name: Environment variable name to check
+            default_on: If env var is missing, treat as enabled when True
+            
+        Returns:
+            Boolean indicating if the flag is enabled
+        """
+        raw = os.getenv(name)
+        if raw is None:
+            return default_on
+        return raw.strip().lower() in ("1", "true", "yes", "on")
+    
+    # Audio processing flags - computed once at module import time
+    USE_AUDIO: bool = flag.__func__("SPEECHUP_USE_AUDIO", default_on=True)
+    USE_ASR: bool = flag.__func__("SPEECHUP_USE_ASR", default_on=True)
+    USE_PROSODY: bool = flag.__func__("SPEECHUP_USE_PROSODY", default_on=True)
+
+
+@lru_cache(maxsize=128)
+def clamp(val: float, lo: float, hi: float) -> float:
+    """
+    Clamp value between lower and upper bounds.
+    
+    This function constrains a value to be within the specified range.
+    It's used throughout the pipeline to normalize metrics to standard ranges.
+    
+    Args:
+        val: Value to clamp
+        lo: Lower bound
+        hi: Upper bound
+        
+    Returns:
+        Clamped value between lo and hi
+    """
+    return max(lo, min(hi, val))
+
+
+@lru_cache(maxsize=32)
+def smooth_wpm_segments(wpm_values: Tuple[float], window_size: int = 3) -> float:
+    """
+    Apply moving average smoothing to WPM values with caching.
+    
+    Args:
+        wpm_values: Tuple of WPM values from different segments (tuple for hashability)
+        window_size: Size of moving average window (default: 3)
+    
+    Returns:
+        Smoothed WPM value
+    """
+    if not wpm_values:
+        return 0.0
+    
+    if len(wpm_values) < window_size:
+        # If not enough segments, return simple average
+        return sum(wpm_values) / len(wpm_values)
+    
+    # Apply moving average using numpy for better performance
+    values_array = np.array(wpm_values)
+    kernel = np.ones(window_size) / window_size
+    smoothed_values = np.convolve(values_array, kernel, mode='valid')
+    
+    # Return average of smoothed values
+    return float(np.mean(smoothed_values)) if len(smoothed_values) > 0 else 0.0
+
+
+@lru_cache(maxsize=128)
+def bucket_key(ts: float) -> str:
+    """
+    Convert timestamp to 5-second bucket key.
+    
+    Args:
+        ts: Timestamp in seconds
+        
+    Returns:
+        String bucket key in format "start-end"
+    """
+    b0 = int(ts // 5) * 5
+    return f"{b0}-{b0+5}"
+
+
+@lru_cache(maxsize=128)
+def compute_posture_openness(pose_landmarks, frame_width: int) -> float:
+    """
+    Compute posture openness based on shoulder span.
+    
+    Args:
+        pose_landmarks: MediaPipe pose landmarks
+        frame_width: Width of the video frame
+        
+    Returns:
+        Float value between 0.0 and 1.0 representing posture openness
+    """
+    if not pose_landmarks:
+        return 0.5  # Default neutral posture
+    
+    try:
+        # Get shoulder landmarks
+        left_shoulder = pose_landmarks.landmark[mp.solutions.holistic.PoseLandmark.LEFT_SHOULDER]
+        right_shoulder = pose_landmarks.landmark[mp.solutions.holistic.PoseLandmark.RIGHT_SHOULDER]
+        
+        # Compute shoulder span in normalized coordinates
+        shoulder_span = math.sqrt((right_shoulder.x - left_shoulder.x)**2 + 
+                               (right_shoulder.y - left_shoulder.y)**2)
+        
+        # Map to posture_openness via clamp: (shoulder_span_norm - 0.15) / (0.35 - 0.15)
+        # This maps typical shoulder spans [0.15, 0.35] to [0, 1]
+        posture_openness = clamp((shoulder_span - 0.15) / 0.2, 0.0, 1.0)
+        
+        return posture_openness
+    except (IndexError, AttributeError) as e:
+        logger.debug(f"Error computing posture openness: {e}")
+        return 0.5  # Safe default
+
+
+@lru_cache(maxsize=128)
+def compute_expression_variability(face_landmarks) -> float:
+    """
+    Compute expression variability using FaceMesh landmarks.
+    
+    Args:
+        face_landmarks: MediaPipe face mesh landmarks
+        
+    Returns:
+        Float value between 0.0 and 1.0 representing expression variability
+    """
+    if not face_landmarks:
+        return 0.0
+    
+    try:
+        # Get landmark indices for facial features
+        MOUTH_LEFT = 61
+        MOUTH_RIGHT = 291
+        MOUTH_TOP = 13
+        MOUTH_BOTTOM = 14
+        LEFT_BROW = 70
+        RIGHT_BROW = 300
+        LEFT_EYE = 33
+        RIGHT_EYE = 133
+        
+        # Extract landmarks
+        left_corner = face_landmarks.landmark[MOUTH_LEFT]
+        right_corner = face_landmarks.landmark[MOUTH_RIGHT]
+        top_mouth = face_landmarks.landmark[MOUTH_TOP]
+        bottom_mouth = face_landmarks.landmark[MOUTH_BOTTOM]
+        
+        # Compute Euclidean distances
+        mouth_width = math.sqrt((right_corner.x - left_corner.x)**2 + 
+                               (right_corner.y - left_corner.y)**2)
+        mouth_height = math.sqrt((top_mouth.x - bottom_mouth.x)**2 + 
+                                (top_mouth.y - bottom_mouth.y)**2)
+        
+        # Avoid division by zero
+        smile_ratio = mouth_width / max(mouth_height, 0.001)
+        
+        # Brow raise calculation
+        left_brow = face_landmarks.landmark[LEFT_BROW]
+        right_brow = face_landmarks.landmark[RIGHT_BROW]
+        left_eye = face_landmarks.landmark[LEFT_EYE]
+        right_eye = face_landmarks.landmark[RIGHT_EYE]
+        
+        left_brow_raise = math.sqrt((left_brow.x - left_eye.x)**2 + 
+                                   (left_brow.y - left_eye.y)**2)
+        right_brow_raise = math.sqrt((right_brow.x - right_eye.x)**2 + 
+                                    (right_brow.y - right_eye.y)**2)
+        brow_raise = (left_brow_raise + right_brow_raise) / 2.0
+        
+        # Normalize and combine with weights
+        smile_norm = clamp(smile_ratio / 2.0, 0.0, 1.0)  # Assuming max ratio is ~2.0
+        brow_norm = clamp(brow_raise / 0.1, 0.0, 1.0)   # Assuming max distance is ~0.1
+        
+        # Combine with weights: 60% smile, 40% brow
+        expression_variability = 0.6 * smile_norm + 0.4 * brow_norm
+        
+        return clamp(expression_variability, 0.0, 1.0)
+        
+    except (IndexError, AttributeError) as e:
+        logger.debug(f"Error computing expression variability: {e}")
+        return 0.0  # Safe default
+
+
+class GestureDetector:
+    """
+    Optimized gesture detection state machine with improved performance and readability.
+    
+    This class implements a gesture detection algorithm using a hysteresis-based state machine
+    to identify and track meaningful hand gestures while filtering out noise and false positives.
+    It tracks gesture amplitude, duration, and face presence to ensure high-quality gesture events.
+    
+    Attributes:
+        config: Configuration object with gesture detection parameters
+        gesture_active: Current state of gesture detection (active or inactive)
+        gesture_start_idx: Frame index where the current gesture started
+        gesture_face_hits: Number of frames with face detected during current gesture
+        gesture_sum_amp: Sum of amplitudes for the current gesture (for averaging)
+        gesture_n_amp: Number of amplitude samples in the current gesture
+        gesture_last_end_t: Timestamp when the last gesture ended (for cooldown)
+        gesture_candidates: Count of candidate gestures detected
+        confirmed_events: List of confirmed gesture events
+        gesture_buckets: Time-bucketed gesture data for statistics
+    """
+    
+    def __init__(self, config: 'Config') -> None:
+        """
+        Initialize the gesture detector with configuration parameters.
+        
+        Args:
+            config: Configuration object with gesture detection parameters
+        """
+        self.config = config
+        self.gesture_active: bool = False
+        self.gesture_start_idx: int = -1
+        self.gesture_face_hits: int = 0
+        self.gesture_sum_amp: float = 0.0
+        self.gesture_n_amp: int = 0
+        self.gesture_last_end_t: float = float("-inf")
+        self.gesture_candidates: int = 0
+        self.confirmed_events: List[Dict[str, Any]] = []
+        self.gesture_buckets: Dict[str, Dict[str, Any]] = {}
+    
+    def process_frame(self, 
+                     idx: int, 
+                     delta: float, 
+                     t_sec: float, 
+                     has_face: bool, 
+                     fps: float) -> Optional[Dict[str, Any]]:
+        """
+        Process a single frame for gesture detection.
+        
+        Args:
+            idx: Frame index
+            delta: Motion delta magnitude
+            t_sec: Current time in seconds
+            has_face: Boolean indicating if face is detected
+            fps: Frames per second
+            
+        Returns:
+            Event dictionary if a gesture is detected, None otherwise
+        """
+        # Skip warmup period
+        if t_sec < self.config.WARMUP_SEC:
+            return None
+            
+        event = None
+        
+        if not self.gesture_active:
+            # Check if we should start a new gesture window
+            if (delta >= self.config.GESTURE_MIN_AMP and 
+                (t_sec - self.gesture_last_end_t) >= self.config.GESTURE_COOLDOWN_S):
+                # Open window
+                self.gesture_active = True
+                self.gesture_start_idx = idx
+                self.gesture_face_hits = 1 if has_face else 0
+                self.gesture_sum_amp = delta
+                self.gesture_n_amp = 1
+        else:
+            # Accumulate in active window
+            self.gesture_face_hits += 1 if has_face else 0
+            self.gesture_sum_amp += delta
+            self.gesture_n_amp += 1
+            
+            # Check if we should close the window (hysteresis)
+            if delta < self.config.HYST_LOW:
+                # Close window - process candidate
+                self.gesture_candidates += 1
+                end_idx = min(idx, self.gesture_start_idx + int(self.config.MAX_SEG_S * (fps or 30.0)) - 1)
+                duration = (end_idx - self.gesture_start_idx + 1) / (fps or 30.0)
+                
+                if duration >= self.config.GESTURE_MIN_DUR:
+                    # Face ratio check at decision time
+                    if (not self.config.REQUIRE_FACE_FOR_GEST or 
+                        (self.gesture_face_hits / max(1, self.gesture_n_amp)) >= 0.5):
+                        start_t = self.gesture_start_idx / (fps or 30.0)
+                        end_t = (end_idx + 1) / (fps or 30.0)
+                        mean_amp = self.gesture_sum_amp / max(1, self.gesture_n_amp)
+                        
+                        # Duration warning for debugging
+                        if duration > self.config.MAX_SEG_S + 0.05:
+                            logger.warning("Long gesture segment detected: %.2fs (start=%.1fs, end=%.1fs)", 
+                                         duration, start_t, end_t)
+                        
+                        # Confidence normalized above MIN_AMP
+                        conf = max(0.0, min(1.0, (mean_amp - self.config.GESTURE_MIN_AMP) / 
+                                           max(1e-6, (0.9 - self.config.GESTURE_MIN_AMP))))
+                        
+                        event = {
+                            "t": float(start_t),            # backward compatibility
+                            "end_t": float(end_t),
+                            "duration": float(end_t - start_t),
+                            "frame": int(self.gesture_start_idx),
+                            "kind": "gesture",
+                            "label": "hand_motion",
+                            "amplitude": float(mean_amp),
+                            "score": None,
+                            "confidence": float(conf),
+                        }
+                        
+                        # Add to confirmed events
+                        self.confirmed_events.append(event)
+                        
+                        # Update tracking
+                        self.gesture_last_end_t = end_t
+                        
+                        # Update bucket counts
+                        bucket_key = bucket_key(start_t)
+                        self.gesture_buckets[bucket_key] = self.gesture_buckets.get(bucket_key, 0) + 1
+                
+                # Reset window state
+                self.gesture_active = False
+                self.gesture_start_idx = -1
+                self.gesture_face_hits = 0
+                self.gesture_sum_amp = 0.0
+                self.gesture_n_amp = 0
+                
+        return event
+    
+    def finalize(self, idx: int, fps: float) -> List[Dict[str, Any]]:
+        """
+        Process any remaining active gesture window and return all confirmed events.
+        
+        Args:
+            idx: Last frame index
+            fps: Frames per second
+            
+        Returns:
+            List of confirmed gesture events
+        """
+        # Process any remaining active gesture window
+        if self.gesture_active:
+            # Close final window with same logic
+            self.gesture_candidates += 1
+            end_idx = min(idx - 1, self.gesture_start_idx + int(self.config.MAX_SEG_S * (fps or 30.0)) - 1)
+            duration = (end_idx - self.gesture_start_idx + 1) / (fps or 30.0)
+            
+            if duration >= self.config.GESTURE_MIN_DUR:
+                # Face ratio check at decision time
+                if (not self.config.REQUIRE_FACE_FOR_GEST or 
+                    (self.gesture_face_hits / max(1, self.gesture_n_amp)) >= 0.5):
+                    start_t = self.gesture_start_idx / (fps or 30.0)
+                    end_t = (end_idx + 1) / (fps or 30.0)
+                    mean_amp = self.gesture_sum_amp / max(1, self.gesture_n_amp)
+                    
+                    # Confidence normalized above MIN_AMP
+                    conf = max(0.0, min(1.0, (mean_amp - self.config.GESTURE_MIN_AMP) / 
+                                       max(1e-6, (0.9 - self.config.GESTURE_MIN_AMP))))
+                    
+                    self.confirmed_events.append({
+                        "t": float(start_t),
+                        "end_t": float(end_t),
+                        "duration": float(end_t - start_t),
+                        "frame": int(self.gesture_start_idx),
+                        "kind": "gesture",
+                        "label": "hand_motion",
+                        "amplitude": float(mean_amp),
+                        "score": None,
+                        "confidence": float(conf),
+                    })
+                    
+                    # Update bucket counts
+                    bucket_key = bucket_key(start_t)
+                    self.gesture_buckets[bucket_key] = self.gesture_buckets.get(bucket_key, 0) + 1
+        
+        return self.confirmed_events
+    
+    @property
+    def stats(self) -> Dict[str, Any]:
+        """
+        Get comprehensive gesture statistics.
+        
+        Returns:
+            Dictionary with gesture statistics
+        """
+        return {
+            "total_candidates": self.gesture_candidates,
+            "total_events": len(self.confirmed_events),
+            "buckets": self.gesture_buckets
+        }
+
+
+class AudioProcessor:
+    """
+    Audio processing module with improved error handling and modularization.
+    
+    This class encapsulates all audio-related processing including:
+    - Audio extraction from video
+    - VAD (Voice Activity Detection) segment calculation
+    - Pause metrics computation
+    - ASR (Automatic Speech Recognition) processing
+    - Prosody metrics calculation
+    - Filler word detection
+    """
+    
+    def __init__(self, config=None):
+        """
+        Initialize the audio processor with configuration parameters.
+        
+        Args:
+            config: Configuration object (uses Config class if None)
+        """
+        self.config = config or Config
+        self.use_audio = self.config.USE_AUDIO
+        self.use_asr = self.config.USE_ASR
+        self.use_prosody = self.config.USE_PROSODY
+        
+        # Results storage
+        self.wav_path = None
+        self.segments = []
+        self.transcript = None
+        self.transcript_short = None
+        self.speech_dur_sec = 0.0
+        self.pause_metrics = {}
+        self.prosody_metrics = {}
+        self.wpm = 0.0
+        self.fillers = {}
+        self.fillers_per_min = 0.0
+        self.articulation_rate = 0.0
+        self.stt_confidence = 0.0
+        
+        # Error tracking
+        self.errors = []
+    
+    def process_video(self, video_path: str, duration_sec: float) -> Dict[str, Any]:
+        """
+        Process audio from a video file.
+        
+        Args:
+            video_path: Path to the video file
+            duration_sec: Duration of the video in seconds
+            
+        Returns:
+            Dictionary with verbal and prosody metrics
+        """
+        if not (self.use_audio or self.use_asr or self.use_prosody):
+            logger.info("Audio processing disabled by configuration")
+            return self._get_default_results()
+        
+        t_audio0 = time.time()
+        
+        try:
+            # Extract audio from video
+            self.wav_path = extract_wav_mono_16k(video_path)
+            
+            if not self.wav_path:
+                self.errors.append("Failed to extract audio from video")
+                logger.warning("Failed to extract audio from video")
+                return self._get_default_results()
+                
+            # Process VAD segments and pause metrics
+            self._process_vad_segments(duration_sec)
+            
+            # Process prosody if enabled
+            if self.use_prosody:
+                self._process_prosody()
+                
+            # Process ASR if enabled
+            if self.use_asr:
+                self._process_asr(duration_sec)
+                
+            logger.info(
+                "Audio processing: %s segments, avg_pause_sec=%.2f, pause_rate_per_min=%.2f",
+                len(self.segments), self.pause_metrics.get("avg_pause_sec", 0.0), 
+                self.pause_metrics.get("pause_rate_per_min", 0.0)
+            )
+            logger.info("Audio processing completed in %.1f ms", (time.time() - t_audio0) * 1000)
+            
+        except Exception as e:
+            self.errors.append(f"Audio processing error: {str(e)}")
+            logger.exception("Audio processing failed: %s", e)
+            return self._get_default_results()
+            
+        return self._get_results()
+    
+    def _process_vad_segments(self, duration_sec: float) -> None:
+        """
+        Process VAD segments and calculate pause metrics.
+        
+        Args:
+            duration_sec: Duration of the video in seconds
+        """
+        try:
+            self.segments = compute_vad_segments(self.wav_path) or []
+            self.pause_metrics = compute_pause_metrics(self.segments, duration_sec)
+            
+            # Calculate speech duration from segments
+            self.speech_dur_sec = sum(
+                (e.get("end", 0.0) - e.get("start", 0.0)) 
+                for e in self.segments 
+                if e.get("end", 0.0) > e.get("start", 0.0)
+            ) if self.segments else 0.0
+            
+            logger.info("VAD segments: %s, computed speech_dur_sec: %.2fs", 
+                       len(self.segments), self.speech_dur_sec)
+            
+        except Exception as e:
+            self.errors.append(f"VAD processing error: {str(e)}")
+            logger.warning("VAD processing failed: %s", e)
+            self.segments = []
+            self.pause_metrics = {}
+            self.speech_dur_sec = 0.0
+    
+    def _process_prosody(self) -> None:
+        """Process prosody metrics from audio."""
+        t_pro0 = time.time()
+        try:
+            self.prosody_metrics = compute_prosody_metrics(self.wav_path, self.segments) or {}
+            logger.info("Prosody processing completed in %.1f ms", (time.time() - t_pro0) * 1000)
+            
+            # Log prosody metrics if available
+            if self.prosody_metrics.get("pitch_mean_hz", 0.0) > 0:
+                logger.info(
+                    "Prosody metrics: pitch_mean=%.1fHz, range=%.1fst, pitch_cv=%.2f, "
+                    "energy_cv=%.2f, rhythm=%.2f",
+                    self.prosody_metrics.get("pitch_mean_hz", 0.0),
+                    self.prosody_metrics.get("pitch_range_semitones", 0.0),
+                    self.prosody_metrics.get("pitch_cv", 0.0),
+                    self.prosody_metrics.get("energy_cv", 0.0),
+                    self.prosody_metrics.get("rhythm_consistency", 0.0)
+                )
+                
+        except Exception as e:
+            self.errors.append(f"Prosody processing error: {str(e)}")
+            logger.warning("Prosody processing failed: %s", e)
+            self.prosody_metrics = {}
+    
+    def _process_asr(self, duration_sec: float) -> None:
+        """
+        Process ASR transcription and derived metrics.
+        
+        Args:
+            duration_sec: Duration of the video in seconds
+        """
+        t_asr0 = time.time()
+        try:
+            # Transcribe audio
+            asr_result = transcribe_wav(self.wav_path, lang=None) or {}
+            
+            # Use trimmed duration if VAD not available
+            if self.speech_dur_sec < 0.1:
+                self.speech_dur_sec = asr_result.get("duration_sec", 0.0)
+            
+            # Extract transcript
+            self.transcript = asr_result.get("transcript", "")
+            self.stt_confidence = asr_result.get("confidence", 0.0)
+            
+            # Create transcript preview
+            preview_max = self.config.TRANSCRIPT_PREVIEW_MAX
+            self.transcript_short = (
+                self.transcript[:preview_max] + "..." if len(self.transcript) > preview_max else self.transcript
+            )
+            
+            # Compute WPM if we have a transcript and speech duration
+            if self.transcript and self.speech_dur_sec > 0:
+                # Compute WPM
+                self.wpm = compute_wpm(self.transcript, self.speech_dur_sec)
+                
+                # Compute articulation rate (syllables per second)
+                self.articulation_rate = asr_result.get("articulation_rate_sps", 0.0)
+                
+                # Detect fillers
+                self.fillers = detect_spanish_fillers(self.transcript)
+                self.fillers_per_min = normalize_fillers_per_minute(
+                    self.fillers, duration_sec
+                )
+                
+                logger.info(
+                    "ASR metrics: wpm=%.1f, articulation_rate=%.1f sps, fillers_per_min=%.1f",
+                    self.wpm, self.articulation_rate, self.fillers_per_min
+                )
+            
+            logger.info("ASR processing completed in %.1f ms", (time.time() - t_asr0) * 1000)
+            
+        except Exception as e:
+            self.errors.append(f"ASR processing error: {str(e)}")
+            logger.warning("ASR processing failed: %s", e)
+            self.transcript = ""
+            self.transcript_short = ""
+            self.wpm = 0.0
+            self.articulation_rate = 0.0
+            self.fillers = {}
+            self.fillers_per_min = 0.0
+            self.stt_confidence = 0.0
+    
+    def _get_default_results(self) -> Dict[str, Any]:
+        """Get default results when audio processing is disabled or fails."""
+        return {
+            "verbal": {
+                "wpm": 0.0,
+                "articulation_rate_sps": 0.0,
+                "fillers_per_min": 0.0,
+                "filler_counts": {},
+                "avg_pause_sec": 0.0,
+                "pause_rate_per_min": 0.0,
+                "long_pauses": [],
+                "pronunciation_score": 0.0,
+                "stt_confidence": 0.0,
+                "transcript_short": None,
+            },
+            "prosody": {
+                "pitch_mean_hz": 0.0,
+                "pitch_range_semitones": 0.0,
+                "pitch_cv": 0.0,
+                "energy_cv": 0.0,
+                "rhythm_consistency": 0.0,
+            },
+            "audio_available": False,
+            "errors": self.errors
+        }
+    
+    def _get_results(self) -> Dict[str, Any]:
+        """Get processed audio results."""
+        return {
+            "verbal": {
+                "wpm": float(self.wpm),
+                "articulation_rate_sps": float(self.articulation_rate),
+                "fillers_per_min": float(self.fillers_per_min),
+                "filler_counts": self.fillers,
+                "avg_pause_sec": float(self.pause_metrics.get("avg_pause_sec", 0.0)),
+                "pause_rate_per_min": float(self.pause_metrics.get("pause_rate_per_min", 0.0)),
+                "long_pauses": self.pause_metrics.get("long_pauses", []),
+                "pronunciation_score": 0.0,  # Placeholder for future implementation
+                "stt_confidence": float(self.stt_confidence),
+                "transcript_short": self.transcript_short,
+                "transcript": self.transcript if self.config.INCLUDE_FULL_TRANSCRIPT else None,
+            },
+            "prosody": {
+                "pitch_mean_hz": float(self.prosody_metrics.get("pitch_mean_hz", 0.0)),
+                "pitch_range_semitones": float(self.prosody_metrics.get("pitch_range_semitones", 0.0)),
+                "pitch_cv": float(self.prosody_metrics.get("pitch_cv", 0.0)),
+                "energy_cv": float(self.prosody_metrics.get("energy_cv", 0.0)),
+                "rhythm_consistency": float(self.prosody_metrics.get("rhythm_consistency", 0.0)),
+            },
+            "audio_available": True,
+            "errors": self.errors
+        }
+
+
+def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
+    """
+    Optimized video analysis pipeline that processes a video file and extracts various metrics.
+    
+    This function analyzes a video for:
+    - Face detection and tracking
+    - Pose analysis and posture openness
+    - Hand motion and gesture detection
+    - Expression variability
+    - Gaze direction estimation
+    - Audio processing (if enabled)
+    - ASR transcription (if enabled)
+    - Prosody metrics (if enabled)
+    
+    Args:
+        video_path: Path to the video file to analyze
+        
+    Returns:
+        Dictionary with comprehensive analysis results
+    """
+    t0 = time.time()
+    logger.info("Starting analysis pipeline for %s", video_path)
+    
+    # Initialize MediaPipe models
+    with mp.solutions.holistic.Holistic(
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5,
+        model_complexity=1,
+        smooth_landmarks=True,
+    ) as holistic, mp.solutions.face_mesh.FaceMesh(
+        max_num_faces=1,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5,
+        static_image_mode=False,
+    ) as face_mesh:
+        
+        # Initialize video capture
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            logger.error("Failed to open video: %s", video_path)
+            return {"error": "Failed to open video file"}
+        
+        # Get video properties
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps < 1.0:
+            fps = 30.0  # Default if detection fails
+            logger.warning("Invalid FPS detected, using default: %.1f", fps)
+        else:
+            logger.info("Video FPS: %.1f", fps)
+        
+        # Initialize counters and accumulators
+        frames_total = 0
+        frames_with_face = 0
+        face_center_dist_sum = 0.0
+        head_motion_sum = 0.0
+        hand_motion_magnitude_sum = 0.0
+        posture_openness_sum = 0.0
+        expression_variability_sum = 0.0
+        gaze_screen_hits = 0
+        
+        # Initialize gesture detector
+        gesture_detector = GestureDetector(Config)
+        
+        # Initialize event tracking
+        events = []
+        prev_face_center = None
+        prev_hand_pos = None
+        
+        # Process video frames
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+                
+            # Skip frames for performance (process ~10 fps)
+            if frames_total % max(1, int(fps / 10)) != 0 and frames_total > 0:
+                frames_total += 1
+                continue
+                
+            # Convert to RGB for MediaPipe
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, _ = frame.shape
+            
+            # Process with MediaPipe
+            t_frame = time.time()
+            holistic_results = holistic.process(frame_rgb)
+            face_results = face_mesh.process(frame_rgb)
+            
+            # Current time in seconds
+            t_sec = frames_total / fps
+            
+            # Process face landmarks if detected
+            face_detected = False
+            if face_results.multi_face_landmarks:
+                face_landmarks = face_results.multi_face_landmarks[0]
+                face_detected = True
+                frames_with_face += 1
+                
+                # Calculate face center
+                face_center = np.mean([[lm.x, lm.y] for lm in face_landmarks.landmark], axis=0)
+                
+                # Track face movement
+                if prev_face_center is not None:
+                    face_center_dist = np.linalg.norm(face_center - prev_face_center)
+                    face_center_dist_sum += face_center_dist
+                    
+                    # Head motion is proportional to face center movement
+                    head_motion = face_center_dist * 100  # Scale for better numerical range
+                    head_motion_sum += head_motion
+                
+                prev_face_center = face_center
+                
+                # Calculate expression variability
+                expression_var = compute_expression_variability(face_landmarks)
+                expression_variability_sum += expression_var
+                
+                # Estimate gaze direction
+                if is_looking_at_camera(face_landmarks):
+                    gaze_screen_hits += 1
+            
+            # Process pose landmarks if detected
+            posture_openness = 0.5  # Default neutral value
+            if holistic_results.pose_landmarks:
+                posture_openness = compute_posture_openness(holistic_results.pose_landmarks, w)
+                posture_openness_sum += posture_openness
+            
+            # Process hand landmarks and detect gestures
+            hand_motion_magnitude = 0.0
+            if holistic_results.left_hand_landmarks or holistic_results.right_hand_landmarks:
+                # Calculate hand position and motion
+                current_hand_pos = get_hand_position(holistic_results)
+                
+                if prev_hand_pos is not None and current_hand_pos is not None:
+                    hand_motion_vector = np.array(current_hand_pos) - np.array(prev_hand_pos)
+                    hand_motion_magnitude = np.linalg.norm(hand_motion_vector)
+                    hand_motion_magnitude_sum += hand_motion_magnitude
+                
+                prev_hand_pos = current_hand_pos
+                
+                # Process gesture detection
+                gesture_event = gesture_detector.process_frame(
+                    idx=frames_total,
+                    delta=hand_motion_magnitude,
+                    t_sec=t_sec,
+                    has_face=face_detected,
+                    fps=fps
+                )
+                
+                if gesture_event:
+                    events.append(gesture_event)
+            
+            frames_total += 1
+            
+            # Log processing time periodically
+            if frames_total % 30 == 0:
+                logger.debug("Frame %d processed in %.1f ms", frames_total, (time.time() - t_frame) * 1000)
+        
+        # Finalize gesture detection
+        gesture_detector.finalize(frames_total, fps)
+        gesture_events = len(gesture_detector.confirmed_events)
+        gesture_stats = gesture_detector.stats
+        
+        # Release video capture
+        cap.release()
+        
+        # Calculate duration
+        duration_sec = frames_total / fps
+        
+        # Calculate derived metrics
+        mean_face_center_dist = face_center_dist_sum / max(1, frames_with_face - 1)
+        normalized_head_motion = head_motion_sum / max(1, frames_with_face - 1) / 5.0  # Normalize to [0,1] range
+        hand_motion_magnitude_avg = hand_motion_magnitude_sum / max(1, frames_total)
+        
+        # Calculate average metrics
+        avg_posture_openness = posture_openness_sum / max(1, frames_with_face)
+        avg_expression_variability = expression_variability_sum / max(1, frames_with_face)
+        
+        # Calculate gesture rate per minute
+        gesture_rate_per_min = (gesture_events / duration_sec) * 60 if duration_sec > 0 else 0
+        
+        # Calculate gaze metrics
+        gaze_screen_pct = gaze_screen_hits / max(1, frames_with_face) if frames_with_face > 0 else 0
+        
+        # Head stability (inverted head motion)
+        head_stability = clamp(1.0 - (4.0 * normalized_head_motion), 0.0, 1.0)
+        
+        # Gesture amplitude: normalize hand motion magnitude to [0,1]
+        gesture_amplitude = clamp(hand_motion_magnitude_avg / 0.1, 0.0, 1.0)
+        
+        # Engagement metric: 60% gesture rate + 40% gesture amplitude
+        gesture_rate_norm = clamp(gesture_rate_per_min / 10.0, 0.0, 1.0)
+        engagement = 0.6 * gesture_rate_norm + 0.4 * gesture_amplitude
+        
+        # Ensure all metrics are properly clamped to [0,1]
+        posture_openness = clamp(avg_posture_openness, 0.0, 0.95)
+        expression_variability = clamp(avg_expression_variability, 0.0, 1.0)
+        gaze_screen_pct = clamp(gaze_screen_pct, 0.0, 1.0)
+        head_stability = clamp(head_stability, 0.0, 1.0)
+        gesture_amplitude = clamp(gesture_amplitude, 0.0, 1.0)
+        engagement = clamp(engagement, 0.0, 1.0)
+        
+        # Initialize result dictionary
+        proc = {
+            "frames_total": frames_total,
+            "frames_with_face": frames_with_face,
+            "fps": fps,
+            "duration_sec": duration_sec,
+            "dropped_frames_pct": 0.0,  # Placeholder for future implementation
+            "gesture_events": gesture_events,
+            "events": gesture_detector.confirmed_events[:Config.MAX_EVENTS],
+            "gesture_stats": gesture_stats,
+            # Accumulators for derived metrics
+            "face_center_dist_sum": face_center_dist_sum,
+            "head_motion_sum": head_motion_sum,
+            "hand_motion_magnitude_sum": hand_motion_magnitude_sum,
+            # Derived metrics
+            "mean_face_center_dist": mean_face_center_dist,
+            "normalized_head_motion": normalized_head_motion,
+            "hand_motion_magnitude_avg": hand_motion_magnitude_avg,
+            "posture_openness": posture_openness,
+            "expression_variability": expression_variability,
+            "gesture_rate_per_min": gesture_rate_per_min,
+            "gaze_screen_pct": gaze_screen_pct,
+            "head_stability": head_stability,
+            "gesture_amplitude": gesture_amplitude,
+            "engagement": engagement,
+        }
+        
+        # Log comprehensive gesture statistics
+        logger.info(
+            "GESTURES -> events=%d, rate_per_min=%.2f, amp_mean=%.3f, amp_p95=%.3f, face_ratio=%.3f",
+            gesture_stats["total_events"], gesture_rate_per_min, 
+            gesture_stats.get("amplitude_mean", 0.0), gesture_stats.get("amplitude_p95", 0.0),
+            (frames_with_face / max(frames_total, 1)) if frames_total else 0.0
+        )
+        
+        logger.info(
+            "PIPELINE END: frames_total=%s, frames_with_face=%s, duration_sec=%.2f, fps=%.1f, "
+            "gesture_events=%s, posture_openness=%.3f, expression_variability=%.3f, "
+            "gesture_rate_per_min=%.2f, gaze_screen_pct=%.3f, head_stability=%.3f, "
+            "gesture_amplitude=%.3f, engagement=%.3f",
+            frames_total, frames_with_face, duration_sec, fps, gesture_events,
+            posture_openness, expression_variability, gesture_rate_per_min, 
+            gaze_screen_pct, head_stability, gesture_amplitude, engagement
+        )
+        
+        # Process audio using the AudioProcessor
+        audio_processor = AudioProcessor(Config)
+        audio_results = audio_processor.process_video(video_path, duration_sec)
+        
+        # Merge audio results with visual results
+        proc.update(audio_results)
+        
+        # Compute dynamic scores
+        try:
+            proc["scores"] = compute_scores(proc)
+            logger.info("Dynamic scores computed successfully")
+        except Exception as e:
+            logger.warning("Score computation failed, using defaults: %s", e)
+            # Fallback to default scores if computation fails
+            proc["scores"] = {
+                "fluency": 65,
+                "clarity": 65,
+                "delivery_confidence": 65,
+                "pronunciation": 65,
+                "pace": 65,
+                "engagement": 65,
+            }
+        
+        # Log total processing time
+        logger.info("Total pipeline processing time: %.2f seconds", time.time() - t0)
+        
+        return proc
+
+
+# Helper functions
+
+@lru_cache(maxsize=128)
+def is_looking_at_camera(face_landmarks) -> bool:
+    """
+    Estimate if the person is looking at the camera based on face landmarks.
+    
+    Args:
+        face_landmarks: MediaPipe face landmarks
+        
+    Returns:
+        Boolean indicating if the person is likely looking at the camera
+    """
+    # Simple implementation - could be improved with more sophisticated gaze estimation
+    # This checks if the face is relatively frontal by comparing eye positions
+    try:
+        # Left and right eye outer corners
+        left_eye = face_landmarks.landmark[33]
+        right_eye = face_landmarks.landmark[263]
+        
+        # Nose tip
+        nose_tip = face_landmarks.landmark[4]
+        
+        # Check horizontal symmetry (indicates frontal view)
+        eye_diff = abs(left_eye.x - (1 - right_eye.x))
+        
+        # Check if nose is centered
+        nose_center = abs(nose_tip.x - 0.5)
+        
+        return eye_diff < 0.05 and nose_center < 0.1
+    except (IndexError, AttributeError):
+        return False
+
+
+@lru_cache(maxsize=64)
+def get_hand_position(holistic_results) -> Optional[List[float]]:
+    """
+    Get the average position of detected hands.
+    
+    Args:
+        holistic_results: MediaPipe holistic results
+        
+    Returns:
+        Average hand position as [x, y] or None if no hands detected
+    """
+    positions = []
+    
+    if holistic_results.left_hand_landmarks:
+        left_pos = np.mean([[lm.x, lm.y] for lm in holistic_results.left_hand_landmarks.landmark], axis=0)
+        positions.append(left_pos)
+        
+    if holistic_results.right_hand_landmarks:
+        right_pos = np.mean([[lm.x, lm.y] for lm in holistic_results.right_hand_landmarks.landmark], axis=0)
+        positions.append(right_pos)
+        
+    if positions:
+        return np.mean(positions, axis=0).tolist()
+    return None

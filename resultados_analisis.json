@@ -1,0 +1,97 @@
+{
+  "id": "analysis_demo",
+  "version": "1.0.0",
+  "media": {
+    "duration_sec": 11.4,
+    "lang": "es-AR",
+    "fps": 24
+  },
+  "scores": {
+    "fluency": 88,
+    "clarity": 68,
+    "delivery_confidence": 98,
+    "pronunciation": 83,
+    "pace": 76,
+    "engagement": 20
+  },
+  "verbal": {
+    "wpm": 110.29170405059413,
+    "articulation_rate_sps": 4.2278486552727745,
+    "fillers_per_min": 0.0,
+    "filler_counts": {},
+    "avg_pause_sec": 0.6120000000000229,
+    "pause_rate_per_min": 26.31578947368421,
+    "long_pauses": [],
+    "pronunciation_score": 0.8426956439018249,
+    "stt_confidence": 0.8426956439018249,
+    "transcript_short": "Buenos d\u00edas. Hoy quiero hablar sobre la importancia de practicar. Cont\u00ednpico y paciencia todos aprenden. Paso a paso siempre se progresa.",
+    "transcript_len": 137,
+    "transcript_full": "Buenos d\u00edas. Hoy quiero hablar sobre la importancia de practicar. Cont\u00ednpico y paciencia todos aprenden. Paso a paso siempre se progresa."
+  },
+  "prosody": {
+    "pitch_mean_hz": 258.9357556378941,
+    "pitch_range_semitones": 7.900000000000006,
+    "pitch_cv": 0.1517889844403921,
+    "energy_cv": 0.20103859771884589,
+    "rhythm_consistency": 0.6204434005723589
+  },
+  "lexical": {
+    "lexical_diversity": 0.0,
+    "cohesion_score": 0.0,
+    "summary": "",
+    "keywords": []
+  },
+  "nonverbal": {
+    "gaze_screen_pct": 1.0,
+    "head_stability": 1.0,
+    "posture_openness": 0.0,
+    "gesture_rate_per_min": 0.0,
+    "gesture_amplitude": 0.0,
+    "expression_variability": 0.0,
+    "face_coverage_pct": 0.0,
+    "engagement": 0.0
+  },
+  "events": [],
+  "recommendations": [
+    {
+      "area": "communication",
+      "tip": "Aument\u00e1 un poco la amplitud de los gestos para enfatizar ideas."
+    },
+    {
+      "area": "communication",
+      "tip": "Vari\u00e1 m\u00e1s tus expresiones faciales para mantener el inter\u00e9s."
+    },
+    {
+      "area": "communication",
+      "tip": "Abr\u00ed hombros y manten\u00e9 una postura m\u00e1s expansiva."
+    },
+    {
+      "area": "comunicaci\u00f3n",
+      "tip": "Buen ritmo: claro y f\u00e1cil de seguir."
+    },
+    {
+      "area": "comunicaci\u00f3n",
+      "tip": "Buen uso de pausas: ayuda a procesar el mensaje."
+    },
+    {
+      "area": "presencia",
+      "tip": "Sosten\u00e9 los gestos a lo largo de todo el mensaje, no solo al inicio."
+    },
+    {
+      "area": "voz",
+      "tip": "Marc\u00e1 palabras clave con una leve pausa antes o despu\u00e9s."
+    }
+  ],
+  "labels": [
+    "ritmo adecuado",
+    "pausas regulares"
+  ],
+  "quality": {
+    "frames_analyzed": 273,
+    "dropped_frames_pct": 0.0,
+    "audio_snr_db": 0.0,
+    "analysis_ms": 0,
+    "audio_available": true,
+    "debug": null
+  }
+}
