@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routers import router
-from api.websockets import handle_realtime_feedback, handle_oratory_feedback
+from api.websockets import handle_oratory_feedback, handle_incremental_oratory_feedback
 
 # Cargar variables de entorno desde el archivo .env
 load_dotenv()
@@ -29,5 +29,6 @@ app.add_middleware(
 app.include_router(router)
 
 # Register WebSocket endpoints
-app.websocket("/ws/realtime-feedback")(handle_realtime_feedback)
 app.websocket("/ws/v1/feedback-oratoria")(handle_oratory_feedback)
+
+app.websocket("/ws/v1/incremental-feedback")(handle_incremental_oratory_feedback)
