@@ -33,33 +33,6 @@ def clamp(val: float, lo: float, hi: float) -> float:
     """Clamp value between lo and hi."""
     return max(lo, min(hi, val))
 
-def smooth_wpm_segments(wpm_values: List[float], window_size: int = 3) -> float:
-    """
-    Apply moving average smoothing to WPM values.
-    
-    Args:
-        wpm_values: List of WPM values from different segments
-        window_size: Size of moving average window (default: 3)
-    
-    Returns:
-        Smoothed WPM value
-    """
-    if not wpm_values:
-        return 0.0
-    
-    if len(wpm_values) < window_size:
-        # If not enough segments, return simple average
-        return sum(wpm_values) / len(wpm_values)
-    
-    # Apply 3-point moving average
-    smoothed_values = []
-    for i in range(len(wpm_values) - window_size + 1):
-        window_avg = sum(wpm_values[i:i + window_size]) / window_size
-        smoothed_values.append(window_avg)
-    
-    # Return average of smoothed values
-    return sum(smoothed_values) / len(smoothed_values) if smoothed_values else 0.0
-
 def compute_posture_openness(pose_landmarks, frame_width: int) -> float:
     """Compute posture openness based on shoulder span."""
     if not pose_landmarks:
@@ -155,7 +128,6 @@ def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
     frames_total = 0
     frames_with_face = 0
     gesture_events = 0
-    events = []
     dropped_frames_pct = 0.0
     media = {}
 
@@ -233,9 +205,6 @@ def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
     motion_magnitudes = []  # per-frame motion magnitude
     face_presence = []      # per-frame face presence
     frame_timestamps = []   # per-frame timestamps
-    
-    # Initialize events list for real-time gesture detection (backward compat)
-    events = []
 
     while True:
         ret, frame = cap.read()
@@ -502,7 +471,6 @@ def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
         "head_stability": head_stability,
         "gesture_amplitude": gesture_amplitude,
         "engagement": engagement,
-        # Initialize audio structures with defaults
         "verbal": {
             "wpm": 0.0,
             "articulation_rate_sps": 0.0,
@@ -524,34 +492,12 @@ def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
         },
     }
     
-    # Log comprehensive gesture statistics
-    logger.info(
-        "GESTURES -> events=%d, rate_per_min=%.2f, amp_mean=%.3f, amp_p95=%.3f, face_ratio=%.3f",
-        gesture_stats["total_events"], gesture_stats["rate_per_min"], 
-        gesture_stats["amplitude_mean"], gesture_stats["amplitude_p95"],
-        (gesture_stats["frames_with_face"] / max(gesture_stats["frames_total"], 1)) if gesture_stats["frames_total"] else 0.0
-    )
-    
-    logger.info(
-        "PIPELINE END: frames_total=%s, frames_with_face=%s, duration_sec=%.2f, fps=%.1f, "
-        "gesture_events=%s, posture_openness=%.3f, expression_variability=%.3f, "
-        "gesture_rate_per_min=%.2f, gaze_screen_pct=%.3f, head_stability=%.3f, "
-        "gesture_amplitude=%.3f, engagement=%.3f",
-        frames_total, frames_with_face, duration_sec, fps, gesture_events,
-        posture_openness, expression_variability, gesture_rate_per_min, 
-        gaze_screen_pct, head_stability, gesture_amplitude, engagement
-    )
-    
+
     # Audio processing for pause metrics (gated by SPEECHUP_USE_AUDIO)
     # Flags con default ON
     use_audio   = _flag("SPEECHUP_USE_AUDIO", default_on=True)
     use_asr     = _flag("SPEECHUP_USE_ASR", default_on=True)
     use_prosody = _flag("SPEECHUP_USE_PROSODY", default_on=True)
-
-    logger.info(
-        "FEATURES (effective) -> USE_AUDIO=%s USE_ASR=%s USE_PROSODY=%s",
-        use_audio, use_asr, use_prosody
-    )
 
     wav_path = None
     segments = []
@@ -596,16 +542,8 @@ def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
                         })
                     except Exception as e:
                         logger.warning("Prosody failed, defaults applied: %s", e)
-                    logger.info("Stage prosody done in %.1f ms", (time.time() - t_pro0) * 1000)
-                
+
                 proc["audio_available"] = True
-                
-                logger.info(
-                    "Audio processing: %s segments, avg_pause_sec=%.2f, pause_rate_per_min=%.2f",
-                    len(segments), pause_metrics.get("avg_pause_sec", 0.0), 
-                    pause_metrics.get("pause_rate_per_min", 0.0)
-                )
-                logger.info("Stage audio+vad done in %.1f ms", (time.time() - t_audio0) * 1000)
                 
                 # Log prosody metrics if enabled
                 if use_prosody and proc["prosody"].get("pitch_mean_hz", 0.0) > 0:
@@ -633,9 +571,7 @@ def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
                         if speech_dur_sec < 0.1:
                             speech_dur_sec = asr_result.get("duration_sec", 0.0)
                         
-                        # Log ASR health info
-                        logger.info(f"ASR enabled: model={os.getenv('SPEECHUP_ASR_MODEL','base')}, device={os.getenv('WHISPER_DEVICE','auto')}, duration={getattr(asr_result,'duration_sec',0.0)}s, used_window={asr_result.get('duration_sec',0.0)}s")
-                        
+
                         if asr_result.get("ok"):
                             text = asr_result.get("text", "") or ""
                             dur  = float(asr_result.get("duration_sec") or duration_sec or 0.0)
@@ -662,9 +598,7 @@ def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
                             # Include full transcript if enabled
                             if include_full:
                                 proc["verbal"]["transcript_full"] = full_text
-                            
-                            logger.info("ASR ok: dur=%.2fs wpm=%.1f stt_conf=%.2f", dur, wpm, proc["verbal"]["stt_confidence"])
-                            
+
                             # Fill missing verbal metrics
                             syll_per_word_es = 2.3  # Spanish average syllables per word
                             proc["verbal"]["articulation_rate_sps"] = float(max(0.0, (wpm * syll_per_word_es) / 60.0))
@@ -687,33 +621,15 @@ def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
                                 
                                 if long_pauses:
                                     proc["verbal"]["long_pauses"] = long_pauses
-                            
-                            # Apply WPM smoothing for videos >= 20s
-                            if duration_sec >= 20.0:
-                                # For longer videos, apply 3-point moving average smoothing
-                                # This is a simplified approach - in a real implementation you might
-                                # want to segment the audio and compute WPM per segment
-                                wpm_smoothed = wpm  # For now, keep as is since we don't have segment-level WPM
-                                logger.info(f"WPM smoothing applied for video >=20s: raw={wpm:.1f}, smoothed={wpm_smoothed:.1f}")
-                            
-                            if os.getenv("SPEECHUP_DEBUG_ASR", "0") == "1":
-                                logger.info(f"ASR transcript snippet: {text[:120]}")
-                                logger.info(f"ASR transcript_short: {asr_result.get('transcript_short', '')}")
+
                         else:
                             asr_error = asr_result.get("error", "asr_not_ok")
                             logger.warning("ASR not ok: %s", asr_error)
                     except Exception as e:
                         asr_error = str(e)
                         logger.exception("ASR stage failed: %s", e)
-                    logger.info("Stage ASR done in %.1f ms", (time.time() - t_asr0) * 1000)
-                else:
-                    if not (use_audio or use_asr):
-                        logger.info("ASR skipped (flags off)")
-                    elif not wav_path:
-                        logger.info("ASR skipped (no wav_path)")
-                
+
             else:
-                logger.info("Audio extraction failed, skipping audio processing")
                 proc["audio_available"] = False
                 
         except Exception as e:
@@ -726,14 +642,6 @@ def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
                     os.remove(wav_path)
                 except Exception:
                     pass
-    else:
-        logger.info("Audio processing disabled (flags off)")
-        
-    # Log skipped stages explicitly
-    if not use_prosody:
-        logger.info("Prosody skipped (flag off)")
-    if not (use_audio or use_asr):
-        logger.info("ASR skipped (flags off)")
     
     # Compute dynamic scores based on analysis results
     try:
