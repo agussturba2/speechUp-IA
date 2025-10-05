@@ -64,12 +64,12 @@
     },
     "events": [
         {
-            "t": 12.3,
+            "time": 12.3,
             "kind": "filler",
             "label": "eh"
         },
         {
-            "t": 54.8,
+            "time": 54.8,
             "kind": "good_emphasis",
             "duration": 0.7
         }
