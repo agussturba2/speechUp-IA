@@ -27,6 +27,12 @@ from video.realtime import decode_frame_data
 from utils.gpu import GPU_AVAILABLE
 from .oratory import process_pipeline_results, send_analysis_result
 
+# Importaciones para análisis de audio real
+from audio.asr import transcribe_wav
+from audio.speech import SpeechSegmenter
+from audio.text_metrics import detect_spanish_fillers
+import scipy.io.wavfile as wav
+
 logger = logging.getLogger(__name__)
 
 
@@ -122,6 +128,9 @@ class IncrementalOratorySession:
         
         # NEW: Flag to enable true incremental processing
         self.enable_incremental_processing = True
+        
+        # Speech segmenter for VAD
+        self.speech_segmenter = SpeechSegmenter(vad_mode=2)
 
         # Log GPU status and initialization
         logger.info(f"IncrementalOratorySession initialized with buffer_size={buffer_size}, dimensions={width}x{height}, GPU={GPU_AVAILABLE}")
@@ -557,7 +566,7 @@ class IncrementalOratorySession:
     
     def _process_audio_buffer(self) -> Dict[str, Any]:
         """
-        Process accumulated audio buffer for speech analysis.
+        Process accumulated audio buffer with REAL speech analysis using Whisper and VAD.
         
         Returns:
             Dict with audio analysis results
@@ -566,58 +575,116 @@ class IncrementalOratorySession:
             return {}
             
         try:
-            # In a real implementation, this would perform actual audio analysis
-            # For demo purposes, we'll simulate some basic analysis
+            # Convert buffer to numpy array (16-bit PCM to float32)
+            audio_np = np.frombuffer(
+                self.analysis_audio_buffer, 
+                dtype=np.int16
+            ).astype(np.float32) / 32768.0
             
-            # Calculate audio duration in seconds (16kHz, 16-bit mono)
-            audio_duration = len(self.analysis_audio_buffer) / 32000
-            logger.info(f"Processing {audio_duration:.2f} seconds of audio incrementally")
+            # Calculate audio duration
+            audio_duration = len(audio_np) / 16000.0
+            logger.info(f"Processing {audio_duration:.2f} seconds of audio with REAL analysis")
             
-            # Simulate speech analysis results
+            # 1. VAD - Voice Activity Detection and pause analysis
+            segments = self.speech_segmenter.get_speech_segments(audio_np, 16000)
+            pause_analysis = self.speech_segmenter.analyze_pauses(segments)
+            
+            speech_detected = pause_analysis.get("speech_percent", 0) > 10
+            
+            # Extract pauses from segments
+            pauses = []
+            for is_speech, start, end in segments:
+                if not is_speech:  # Silence segment
+                    pauses.append({
+                        "start_time": start,
+                        "duration": end - start
+                    })
+            
+            # Initialize results
             audio_results = {
                 "duration_sec": audio_duration,
-                "speech_detected": random() > 0.2,  # 80% chance of speech
+                "speech_detected": speech_detected,
                 "words": [],
                 "fillers": [],
-                "pauses": []
+                "pauses": pauses,
+                "pause_analysis": pause_analysis
             }
             
-            # Simulate word detection
-            if audio_results["speech_detected"]:
-                # Simulate ~2 words per second with some randomness
-                word_count = int(audio_duration * (1.5 + random()))
-                audio_results["words"] = [{
-                    "index": i,
-                    "start_time": i * (audio_duration / (word_count + 1)),
-                    "end_time": (i + 0.8) * (audio_duration / (word_count + 1)),
-                    "confidence": 0.7 + random() * 0.3
-                } for i in range(word_count)]
-                
-                # Simulate some fillers (um, eh) - ~1 per 10 seconds with randomness
-                filler_count = int(audio_duration / 10 * random())
-                if filler_count > 0:
-                    audio_results["fillers"] = [{
-                        "type": choice(["um", "eh", "mmm", "like"]),
-                        "time": random() * audio_duration,
-                        "duration": 0.2 + random() * 0.4
-                    } for _ in range(filler_count)]
+            # 2. Transcription with Whisper (only if speech detected)
+            if speech_detected and len(audio_np) > 0:
+                try:
+                    # Save audio to temporary WAV file
+                    temp_wav_fd, temp_wav_path = tempfile.mkstemp(suffix=".wav")
+                    os.close(temp_wav_fd)
                     
-                # Simulate some pauses - ~1 per 5 seconds with randomness
-                pause_count = int(audio_duration / 5 * random())
-                if pause_count > 0:
-                    audio_results["pauses"] = [{
-                        "start_time": random() * audio_duration,
-                        "duration": 0.3 + random() * 0.7
-                    } for _ in range(pause_count)]
+                    # Write WAV file
+                    wav.write(temp_wav_path, 16000, (audio_np * 32768).astype(np.int16))
+                    
+                    # Transcribe using Whisper
+                    logger.info(f"Transcribing audio segment with Whisper")
+                    transcript_result = transcribe_wav(temp_wav_path, lang="es")
+                    
+                    # Clean up temp file
+                    try:
+                        os.unlink(temp_wav_path)
+                    except Exception:
+                        pass
+                    
+                    # Check if transcription was successful
+                    if transcript_result.get("status") == "success":
+                        text = transcript_result.get("text", "").strip()
+                        logger.info(f"Transcription: '{text[:100]}...'")
+                        
+                        # 3. Count words
+                        if text:
+                            words = text.split()
+                            audio_results["words"] = [
+                                {"word": w, "index": i} 
+                                for i, w in enumerate(words)
+                            ]
+                            
+                            # 4. Detect filler words using real analysis
+                            try:
+                                filler_analysis = detect_spanish_fillers(text)
+                                filler_counts = filler_analysis.get("filler_counts", {})
+                                
+                                # Extract filler instances
+                                fillers = []
+                                for filler_type, count in filler_counts.items():
+                                    # Distribute fillers approximately across the audio duration
+                                    for i in range(count):
+                                        fillers.append({
+                                            "type": filler_type,
+                                            "time": (i + 0.5) * (audio_duration / max(1, count)),
+                                            "duration": 0.3
+                                        })
+                                
+                                audio_results["fillers"] = fillers
+                                logger.info(f"Detected {len(fillers)} filler words: {filler_counts}")
+                                
+                            except Exception as filler_error:
+                                logger.error(f"Error analyzing fillers: {filler_error}")
+                                audio_results["fillers"] = []
+                    else:
+                        logger.warning(f"Transcription failed: {transcript_result.get('error', 'Unknown error')}")
+                        
+                except Exception as transcription_error:
+                    logger.error(f"Error in transcription: {transcription_error}", exc_info=True)
             
             # Clear the analysis audio buffer for next iteration
-            # In a real implementation, you might want to keep some overlap
-            self.analysis_audio_buffer = bytearray()
+            # Keep some overlap (last 0.5 seconds) for continuity
+            overlap_bytes = int(0.5 * 16000 * 2)  # 0.5 seconds
+            if len(self.analysis_audio_buffer) > overlap_bytes:
+                self.analysis_audio_buffer = bytearray(self.analysis_audio_buffer[-overlap_bytes:])
+            else:
+                self.analysis_audio_buffer = bytearray()
             
             return audio_results
             
         except Exception as e:
             logger.error(f"Error processing audio buffer: {e}", exc_info=True)
+            # Clear buffer on error
+            self.analysis_audio_buffer = bytearray()
             return {}
     
     def _update_accumulated_state(self, frame_results: Dict[str, Any], audio_results: Dict[str, Any]) -> None:
@@ -1035,7 +1102,7 @@ class IncrementalOratorySession:
                 for filler in self.accumulated_state["verbal"]["filler_instances"]:
                     if isinstance(filler, dict) and "time" in filler and "type" in filler:
                         result["events"].append({
-                            "t": filler["time"],
+                            "time": filler["time"],
                             "kind": "filler",
                             "label": filler["type"],
                             "duration": filler.get("duration", 0.3)
@@ -1055,7 +1122,7 @@ class IncrementalOratorySession:
                 for gesture in self.accumulated_state["nonverbal"]["gestures"]:
                     if isinstance(gesture, dict) and "type" in gesture:
                         result["events"].append({
-                            "t": gesture.get("frame_index", 0) / 30,  # Assuming 30 FPS
+                            "time": gesture.get("frame_index", 0) / 30,  # Assuming 30 FPS
                             "kind": "gesture",
                             "label": gesture["type"],
                             "confidence": gesture.get("confidence", 0.8)
@@ -1090,42 +1157,16 @@ class IncrementalOratorySession:
                 "timestamp": time.time()
             }
             
-        # Añadir los datos incrementales como campo separado para no interferir con el DTO
-        try:
-            # Verificar que accumulated_state y sus subcampos existan
-            if (self.accumulated_state and 
-                "metrics" in self.accumulated_state and 
-                self.accumulated_state["metrics"] is not None):
-                
-                metrics = self.accumulated_state["metrics"]
-                result.setdefault("incremental", {})["metrics"] = {
-                    "wpm": round(metrics.get("wpm", 0.0), 1),
-                    "fillers_per_min": round(metrics.get("fillers_per_min", 0.0), 2),
-                    "gesture_rate": round(metrics.get("gesture_rate", 0.0), 2),
-                    "expression_variability": round(metrics.get("expression_variability", 0.0), 2)
-                }
-            else:
-                # Si no tenemos metrics, crear un diccionario vacío
-                result.setdefault("incremental", {})["metrics"] = {
-                    "wpm": 0.0,
-                    "fillers_per_min": 0.0,
-                    "gesture_rate": 0.0,
-                    "expression_variability": 0.0
-                }
-        except Exception as metrics_error:
-            logger.error(f"Error setting incremental metrics: {metrics_error}")
-            # Asegurarse de que al menos el campo esté inicializado
-            result.setdefault("incremental", {})["metrics"] = {
-                "wpm": 0.0,
-                "fillers_per_min": 0.0,
-                "gesture_rate": 0.0,
-                "expression_variability": 0.0
-            }
-        
         # Usar el campo debug existente para información incremental adicional
         # para evitar problemas con el DTO del backend
         try:
-            debug = result.setdefault("quality", {}).setdefault("debug", {})
+            # Asegurar que quality y debug existan
+            if "quality" not in result:
+                result["quality"] = {}
+            if "debug" not in result["quality"]:
+                result["quality"]["debug"] = {}
+                
+            debug = result["quality"]["debug"]
             debug["incremental_processing"] = True
             
             # Verificar si partial_results existe y no es None
@@ -1141,19 +1182,25 @@ class IncrementalOratorySession:
                 debug["total_frames_received"] = 0
         except Exception as debug_error:
             logger.error(f"Error setting debug fields: {debug_error}")
-            # Asegurar que al menos los campos estén inicializados
-            result.setdefault("quality", {}).setdefault("debug", {}).update({
-                "incremental_processing": True,
-                "incremental_steps": 0,
-                "total_frames_received": 0
-            })
+            # Intentar crear la estructura de forma segura
+            try:
+                if "quality" not in result:
+                    result["quality"] = {}
+                if "debug" not in result["quality"]:
+                    result["quality"]["debug"] = {}
+                result["quality"]["debug"]["incremental_processing"] = True
+                result["quality"]["debug"]["incremental_steps"] = 0
+                result["quality"]["debug"]["total_frames_received"] = 0
+            except Exception:
+                # Si incluso esto falla, simplemente continuar
+                pass
         
         # If any filler events were detected incrementally but are missing in the final result, add them
         try:
             result_filler_times = set()
             for event in result.get("events", []):
-                if event.get("kind") == "filler" and "t" in event:
-                    result_filler_times.add(round(event["t"], 1))
+                if event.get("kind") == "filler" and "time" in event:
+                    result_filler_times.add(round(event["time"], 1))
             
             # Add any incremental fillers that might have been missed
             # Verificar primero que accumulated_state y sus subcampos existan
@@ -1167,8 +1214,10 @@ class IncrementalOratorySession:
                     if isinstance(filler, dict) and "time" in filler:
                         rounded_time = round(filler["time"], 1)
                         if rounded_time not in result_filler_times:
-                            result.setdefault("events", []).append({
-                                "t": filler["time"],
+                            if "events" not in result:
+                                result["events"] = []
+                            result["events"].append({
+                                "time": filler["time"],
                                 "kind": "filler",
                                 "label": filler.get("type", "um"),
                                 "duration": filler.get("duration", 0.3),
