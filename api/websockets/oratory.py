@@ -19,7 +19,6 @@ from video.pipeline import run_analysis_pipeline
 from video.metrics import build_metrics_response
 from api.schemas.analysis_json import AnalysisJSON
 from video.realtime import decode_frame_data
-from utils.gpu import GPU_AVAILABLE
 
 logger = logging.getLogger(__name__)
 
@@ -212,8 +211,6 @@ class OratorySession:
         # Thread pool for async processing
         self.executor = ThreadPoolExecutor(max_workers=1)
 
-        # Log GPU status
-        logger.info(f"OratorySession initialized with GPU acceleration: {GPU_AVAILABLE}")
 
     def add_frame(self, frame_data: bytes) -> bool:
         """

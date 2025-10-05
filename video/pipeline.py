@@ -141,22 +141,9 @@ def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
     # New accumulators for improved metrics
     posture_openness_sum = 0.0
     expression_variability_sum = 0.0
-    gesture_motion_threshold = 0.02  # More sensitive threshold for gesture detection
-    
-    # Gesture event detection configuration
-    GESTURE_MIN_AMPLITUDE = float(os.getenv("SPEECHUP_GESTURE_MIN_AMP", "0.22"))
-    GESTURE_MIN_DURATION = float(os.getenv("SPEECHUP_GESTURE_MIN_DUR", "0.10"))
-    GESTURE_COOLDOWN_S = float(os.getenv("SPEECHUP_GESTURE_COOLDOWN", "0.30"))
-    REQUIRE_FACE_FOR_GEST = os.getenv("SPEECHUP_GESTURE_REQUIRE_FACE", "1") in ("1", "true", "True", "yes", "on")
     
     # Gesture event detection constants
     WARMUP_SEC = 0.5  # ignore first 0.5s
-    MIN_EVENT_GAP_SEC = GESTURE_COOLDOWN_S  # use configurable cooldown
-    
-    # Expression tracking for variability
-    smile_scores = []
-    brow_scores = []
-
     # Models
     mp_face = mp.solutions.face_detection.FaceDetection(min_detection_confidence=0.5)
     mp_holistic = mp.solutions.holistic.Holistic(static_image_mode=False, model_complexity=0)

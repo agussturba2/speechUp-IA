@@ -1,7 +1,6 @@
 """Build metrics response (migrated from video_processor.metrics)."""
 
 from typing import Dict, List, Any
-from .llm_feedback import generar_feedback_llm
 from .scoring import compute_scores
 from .advice_generator import AdviceGenerator
 

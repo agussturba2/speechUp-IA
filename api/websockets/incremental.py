@@ -21,10 +21,7 @@ import httpx
 from random import random, choice, randint
 
 from video.pipeline import run_analysis_pipeline
-from video.metrics import build_metrics_response
-from api.schemas.analysis_json import AnalysisJSON
 from video.realtime import decode_frame_data
-from utils.gpu import GPU_AVAILABLE
 from .oratory import process_pipeline_results, send_analysis_result
 
 # Importaciones para análisis de audio real
