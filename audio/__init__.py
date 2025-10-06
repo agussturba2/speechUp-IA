@@ -7,7 +7,6 @@ This module exports the main audio analysis components:
   - AudioProcessor: Audio preprocessing 
   - ProsodyAnalyzer: Pitch and energy analysis
   - SpeechSegmenter: Voice activity detection
-  - SpeechRecognizer: Speech-to-text and analysis
   - EmotionDetector: Speech emotion analysis
 """
 
@@ -16,7 +15,6 @@ from .extractors import AudioExtractor
 from .processors import AudioProcessor
 # from .prosody import ProsodyAnalyzer  # Removed - replaced with functional approach
 from .speech import SpeechSegmenter
-from .recognition import SpeechRecognizer
 
 # ASR components
 from .asr import transcribe_wav, is_asr_enabled
@@ -25,9 +23,7 @@ from .text_metrics import compute_wpm, detect_spanish_fillers, normalize_fillers
 __all__ = [
     "AudioExtractor",
     "AudioProcessor",
-    # "ProsodyAnalyzer",  # Removed - replaced with functional approach
     "SpeechSegmenter",
-    "SpeechRecognizer",
     # ASR exports
     "transcribe_wav",
     "is_asr_enabled", 
