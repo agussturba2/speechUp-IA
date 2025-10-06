@@ -150,40 +150,6 @@ def extract_wav_mono_16k(video_path: str) -> Optional[str]:
         logger.warning(f"Audio extraction failed: {e}")
         return None
 
-def read_wav_frames_20ms(wav_path: str) -> Tuple[bytes, int]:
-    """
-    Load WAV file and return raw PCM bytes chunked into 20ms frames.
-    
-    Args:
-        wav_path: Path to WAV file
-        
-    Returns:
-        Tuple of (raw_pcm_bytes, sample_rate)
-    """
-    try:
-        with wave.open(wav_path, 'rb') as wav_file:
-            sample_rate = wav_file.getframerate()
-            channels = wav_file.getnchannels()
-            sample_width = wav_file.getsampwidth()
-            
-            # Read all frames
-            raw_frames = wav_file.readframes(wav_file.getnframes())
-            
-            # Convert to mono if stereo
-            if channels == 2:
-                # Convert stereo to mono by averaging channels
-                samples = np.frombuffer(raw_frames, dtype=np.int16)
-                samples = samples.reshape(-1, 2)
-                mono_samples = samples.mean(axis=1).astype(np.int16)
-                raw_frames = mono_samples.tobytes()
-            
-            logger.info(f"Loaded WAV: {sample_rate}Hz, {channels}ch, {sample_width} bytes/sample")
-            return raw_frames, sample_rate
-            
-    except Exception as e:
-        logger.warning(f"Failed to read WAV file: {e}")
-        return b"", 16000
-
 def compute_vad_segments(wav_path: str):
     """
     Robust VAD:

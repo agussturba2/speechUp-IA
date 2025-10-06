@@ -104,9 +104,7 @@ def process_pipeline_results(proc: Dict[str, Any], analysis_time: float) -> Dict
             pipeline_prosody[key] = default_value
 
     result = build_metrics_response(
-        feedbacks=[],
         media=media,
-        gesture_events=gesture_events,
         events=normalized_events,
         analysis_ms=0,
         verbal=pipeline_verbal,
@@ -432,15 +430,23 @@ async def handle_oratory_feedback(
                             # Process the results to generate the full JSON
                             result = process_pipeline_results(proc, analysis_time)
 
-                            # Send the result to the REST endpoint
-                            asyncio.create_task(send_analysis_result(user_id, result))
-
-                            # Send final results to client
-                            await websocket.send_json({
-                                "status": "completed",
-                                "message": "Análisis completado exitosamente",
-                                "timestamp": time.time()
-                            })
+                            # Send the result to the REST endpoint and wait for completion
+                            try:
+                                await send_analysis_result(user_id, result)
+                                # Send final results to client
+                                await websocket.send_json({
+                                    "status": "completed",
+                                    "message": "Análisis completado exitosamente",
+                                    "timestamp": time.time()
+                                })
+                            except Exception as send_error:
+                                logger.error(f"Failed to save analysis to backend: {send_error}")
+                                await websocket.send_json({
+                                    "status": "completed_with_warning",
+                                    "message": "Análisis completado pero no se pudo guardar en el servidor",
+                                    "error": str(send_error),
+                                    "timestamp": time.time()
+                                })
 
                         except Exception as e:
                             logger.error(f"Error processing video: {str(e)}")
@@ -481,15 +487,22 @@ async def handle_oratory_feedback(
                             # Generate feedback
                             feedback = await session.generate_feedback()
 
-                            # Send the result to the REST endpoint
-                            asyncio.create_task(send_analysis_result(user_id, feedback))
-
-                            # Send simplified status to client
-                            await websocket.send_json({
-                                "status": "completed",
-                                "message": "Análisis completado",
-                                "timestamp": time.time()
-                            })
+                            # Send the result to the REST endpoint and wait for completion
+                            try:
+                                await send_analysis_result(user_id, feedback)
+                                # Send simplified status to client
+                                await websocket.send_json({
+                                    "status": "completed",
+                                    "message": "Análisis completado",
+                                    "timestamp": time.time()
+                                })
+                            except Exception as send_error:
+                                logger.error(f"Failed to save analysis to backend: {send_error}")
+                                await websocket.send_json({
+                                    "status": "completed_with_warning",
+                                    "message": "Análisis completado pero no se pudo guardar",
+                                    "timestamp": time.time()
+                                })
 
                             last_analysis_time = time.time()
 
@@ -518,14 +531,21 @@ async def handle_oratory_feedback(
 
                                 feedback = await session.generate_feedback()
 
-                                # Send the result to the REST endpoint
-                                asyncio.create_task(send_analysis_result(user_id, feedback))
-
-                                await websocket.send_json({
-                                    "status": "completed",
-                                    "message": "Análisis completado",
-                                    "timestamp": time.time()
-                                })
+                                # Send the result to the REST endpoint and wait for completion
+                                try:
+                                    await send_analysis_result(user_id, feedback)
+                                    await websocket.send_json({
+                                        "status": "completed",
+                                        "message": "Análisis completado",
+                                        "timestamp": time.time()
+                                    })
+                                except Exception as send_error:
+                                    logger.error(f"Failed to save analysis to backend: {send_error}")
+                                    await websocket.send_json({
+                                        "status": "completed_with_warning",
+                                        "message": "Análisis completado pero no se pudo guardar",
+                                        "timestamp": time.time()
+                                    })
 
                                 last_analysis_time = time.time()
                             else:

@@ -10,7 +10,7 @@ import os
 import time
 import tempfile
 import json
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple, TypedDict
 import cv2
 import numpy as np
 from fastapi import WebSocket, WebSocketDisconnect
@@ -18,8 +18,6 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
 import httpx
-from random import random, choice, randint
-
 from video.pipeline import run_analysis_pipeline
 from video.realtime import decode_frame_data
 from .oratory import process_pipeline_results, send_analysis_result
@@ -31,6 +29,102 @@ from audio.text_metrics import detect_spanish_fillers
 import scipy.io.wavfile as wav
 
 logger = logging.getLogger(__name__)
+
+
+# Type definitions for better type safety
+class AudioAnalysisResult(TypedDict, total=False):
+    """Result from audio buffer processing."""
+    duration_sec: float
+    speech_detected: bool
+    words: List[Dict[str, Any]]
+    fillers: List[Dict[str, Any]]
+    pauses: List[Dict[str, Any]]
+    pause_analysis: Dict[str, Any]
+
+
+class FrameAnalysisResult(TypedDict, total=False):
+    """Result from frame processing."""
+    frames_analyzed: int
+    frames_with_face: int
+    expressions: List[Dict[str, Any]]
+    gestures: List[Dict[str, Any]]
+    posture: List[Dict[str, Any]]
+
+
+class IncrementalMetrics(TypedDict):
+    """Metrics computed from incremental analysis."""
+    wpm: float
+    fillers_per_min: float
+    gesture_rate: float
+    expression_variability: float
+
+
+class AnalysisResult(TypedDict, total=False):
+    """Complete analysis result structure."""
+    status: str
+    ok: bool
+    error: str
+    quality: Dict[str, Any]
+    media: Dict[str, Any]
+    scores: Dict[str, int]
+    verbal: Dict[str, Any]
+    events: List[Dict[str, Any]]
+    timestamp: float
+
+
+# Audio processing constants
+AUDIO_SAMPLE_RATE = 16000
+AUDIO_BYTES_PER_SAMPLE = 2
+AUDIO_CHANNELS = 1
+AUDIO_BYTES_PER_MS = (AUDIO_SAMPLE_RATE * AUDIO_BYTES_PER_SAMPLE) // 1000  # 32 bytes/ms
+AUDIO_NORMALIZATION_FACTOR = 32768.0
+
+# Video constants
+DEFAULT_FPS = 30.0
+DEFAULT_VIDEO_CODEC = 'XVID'
+VIDEO_FALLBACK_CODECS = [('XVID', 'XVID codec - widely compatible'), ('MJPG', 'Motion JPEG codec'), ('DIB ', 'Uncompressed RGB')]
+
+# Buffer limits to prevent excessive memory usage
+MAX_ALL_FRAMES_BUFFER = 3000  # Max frames to store (100 seconds @ 30fps)
+MAX_AUDIO_BUFFER_BYTES = 16000 * 2 * 60  # Max 60 seconds of audio
+
+# Processing constants
+MIN_AUDIO_FOR_TRANSCRIPTION = AUDIO_SAMPLE_RATE * AUDIO_BYTES_PER_SAMPLE  # 1 second
+AUDIO_OVERLAP_SECONDS = 0.5
+MIN_VIDEO_FILE_SIZE = 100  # bytes
+
+
+def _create_video_writer(video_path: str, width: int, height: int, fps: float = DEFAULT_FPS) -> Tuple[Optional[cv2.VideoWriter], Optional[str]]:
+    """
+    Create a video writer with fallback codec support.
+    
+    Args:
+        video_path: Path to save the video file
+        width: Video width
+        height: Video height
+        fps: Frames per second
+        
+    Returns:
+        Tuple of (VideoWriter, codec_name) or (None, None) if all codecs failed
+    """
+    for codec_name, desc in VIDEO_FALLBACK_CODECS:
+        try:
+            logger.debug(f"Attempting to create VideoWriter with {desc}")
+            fourcc = cv2.VideoWriter_fourcc(*codec_name)
+            
+            writer = cv2.VideoWriter(video_path, fourcc, fps, (width, height))
+            
+            if writer.isOpened():
+                logger.info(f"Successfully created VideoWriter with {codec_name} codec")
+                return writer, codec_name
+            else:
+                logger.debug(f"Failed to open VideoWriter with {codec_name}")
+                
+        except Exception as e:
+            logger.debug(f"Error with {codec_name} codec: {e}")
+    
+    logger.error("All video codecs failed")
+    return None, None
 
 
 class IncrementalOratorySession:
@@ -63,13 +157,13 @@ class IncrementalOratorySession:
         self.height = height
         self.processing_interval = processing_interval
 
-        # Initialize frame buffer
+        # Initialize frame buffer with size limit
         self.frame_buffer = deque(maxlen=buffer_size)
         self.audio_buffer = bytearray()
         self.audio_buffer_duration = 0.0  # Track duration of audio in buffer (seconds)
         
-        # Store processed frames for final analysis
-        self.all_frames = []
+        # Store processed frames for final analysis (with limit to prevent OOM)
+        self.all_frames = deque(maxlen=MAX_ALL_FRAMES_BUFFER)
         self.frame_count = 0
         
         # Video storage
@@ -110,9 +204,10 @@ class IncrementalOratorySession:
             "start_time": time.time()
         }
         
-        # NEW: Buffers for incremental analysis
+        # NEW: Buffers for incremental analysis (with limits)
         self.analysis_frame_buffer = []
         self.analysis_audio_buffer = bytearray()
+        self.analysis_audio_buffer_max = MAX_AUDIO_BUFFER_BYTES
         self.last_processed_frame_index = 0
         
         # Analysis state
@@ -130,7 +225,6 @@ class IncrementalOratorySession:
         self.speech_segmenter = SpeechSegmenter(vad_mode=2)
 
         # Log GPU status and initialization
-        logger.info(f"IncrementalOratorySession initialized with buffer_size={buffer_size}, dimensions={width}x{height}, GPU={GPU_AVAILABLE}")
         logger.info(f"Video format: AVI with XVID codec")
         logger.info(f"Incremental processing enabled: {self.enable_incremental_processing}")
 
@@ -161,33 +255,55 @@ class IncrementalOratorySession:
 
     def add_audio(self, audio_data: bytes) -> None:
         """
-        Add audio data to the buffer.
+        Add audio data to the buffer with size limiting.
         
         Args:
             audio_data: Raw audio data
         """
-        # Assume 16kHz, 16-bit mono audio (32 bytes = 1ms)
-        duration_ms = len(audio_data) / 32.0
+        # Calculate duration based on sample rate and format
+        duration_ms = len(audio_data) / float(AUDIO_BYTES_PER_MS)
         duration_sec = duration_ms / 1000.0
         
         self.audio_buffer.extend(audio_data)
         self.audio_buffer_duration += duration_sec
         
-        # Also add to analysis buffer
+        # Limit main audio buffer to prevent excessive memory usage
+        if len(self.audio_buffer) > MAX_AUDIO_BUFFER_BYTES:
+            bytes_to_remove = len(self.audio_buffer) - MAX_AUDIO_BUFFER_BYTES
+            self.audio_buffer = bytearray(self.audio_buffer[bytes_to_remove:])
+            # Adjust duration accordingly
+            removed_duration = bytes_to_remove / float(AUDIO_BYTES_PER_MS) / 1000.0
+            self.audio_buffer_duration = max(0, self.audio_buffer_duration - removed_duration)
+        
+        # Also add to analysis buffer with limit
         self.analysis_audio_buffer.extend(audio_data)
+        if len(self.analysis_audio_buffer) > self.analysis_audio_buffer_max:
+            bytes_to_remove = len(self.analysis_audio_buffer) - self.analysis_audio_buffer_max
+            self.analysis_audio_buffer = bytearray(self.analysis_audio_buffer[bytes_to_remove:])
 
     def end_stream(self) -> None:
         """
         Signal that the stream has ended and final processing can begin.
+        Optimized to avoid rewriting all frames if video already exists.
         """
         logger.info("Stream ending - finalizing data for analysis")
         self.streaming_active = False
         
-        # Close any existing video writer and recreate properly
-        self._cleanup_video_resources()
+        # If we already have a video writer and path, just finalize it
+        if self.video_writer is not None and self.video_path:
+            logger.info("Finalizing existing video file")
+            self._cleanup_video_resources()
+            
+            # Verify the video file is valid
+            if os.path.exists(self.video_path) and os.path.getsize(self.video_path) > MIN_VIDEO_FILE_SIZE:
+                logger.info(f"Video file ready: {self.video_path} ({os.path.getsize(self.video_path)} bytes)")
+                return
+            else:
+                logger.warning("Existing video file is invalid, will recreate")
+                self.video_path = None
         
-        # Create a new AVI video with all accumulated frames
-        if self.all_frames:
+        # Only recreate video if we don't have a valid one
+        if self.all_frames and not self.video_path:
             try:
                 # Find a valid test frame
                 test_frame = None
@@ -209,32 +325,14 @@ class IncrementalOratorySession:
                 os.close(fd)
                 logger.info(f"Created final video file: {self.video_path}")
                 
-                # Try different codecs in order of reliability
-                codecs = [
-                    ('XVID', 'XVID codec - widely compatible'),
-                    ('MJPG', 'Motion JPEG codec'),
-                    ('DIB ', 'Uncompressed RGB'),  # Note the space after DIB
-                ]
+                # Create video writer using helper function
+                self.video_writer, codec_name = _create_video_writer(self.video_path, w, h, DEFAULT_FPS)
                 
                 success = False
-                for codec_name, desc in codecs:
+                if self.video_writer is not None:
                     try:
-                        logger.info(f"Attempting to use {desc} for final video")
-                        fourcc = cv2.VideoWriter_fourcc(*codec_name)
+                        logger.info(f"Writing {len(self.all_frames)} frames to final video")
                         
-                        # Create video writer
-                        self.video_writer = cv2.VideoWriter(
-                            self.video_path, 
-                            fourcc, 
-                            30.0,  # Assume 30 FPS
-                            (w, h)
-                        )
-                        
-                        # Check if writer opened successfully
-                        if not self.video_writer.isOpened():
-                            logger.error(f"Failed to open VideoWriter with {codec_name}")
-                            continue
-                            
                         # Write all frames
                         frames_written = 0
                         for frame in self.all_frames:
@@ -250,7 +348,7 @@ class IncrementalOratorySession:
                         self.video_writer = None
                         
                         # Verify the file was created successfully
-                        if os.path.exists(self.video_path) and os.path.getsize(self.video_path) > 100:
+                        if os.path.exists(self.video_path) and os.path.getsize(self.video_path) > MIN_VIDEO_FILE_SIZE:
                             logger.info(f"Successfully created final video with {frames_written} frames using {codec_name}")
                             logger.info(f"Final video size: {os.path.getsize(self.video_path)} bytes")
                             
@@ -263,7 +361,6 @@ class IncrementalOratorySession:
                                 if frame_count > 0:
                                     logger.info(f"Final video can be opened by OpenCV, contains {frame_count} frames")
                                     success = True
-                                    break
                                 else:
                                     logger.error(f"Final video has no frames according to OpenCV")
                             else:
@@ -272,7 +369,7 @@ class IncrementalOratorySession:
                             logger.error(f"Final video file is empty or too small")
                             
                     except Exception as e:
-                        logger.error(f"Error with {codec_name} codec in end_stream: {e}")
+                        logger.error(f"Error writing final video: {e}")
                 
                 if not success:
                     logger.error("All codecs failed for final video creation")
@@ -315,68 +412,15 @@ class IncrementalOratorySession:
                 h, w = test_frame.shape[:2]
                 logger.info(f"Frame dimensions: {w}x{h}")
                 
-                # Create a temporary file for the video - try .avi format with basic codec
+                # Create a temporary file for the video
                 fd, self.video_path = tempfile.mkstemp(suffix=".avi")
                 os.close(fd)
                 logger.info(f"Created temporary file: {self.video_path}")
                 
-                # Try different codecs in order of reliability
-                codecs = [
-                    ('XVID', 'XVID codec - widely compatible'),
-                    ('MJPG', 'Motion JPEG codec'),
-                    ('DIB ', 'Uncompressed RGB'),  # Note the space after DIB
-                ]
+                # Create video writer using helper function
+                self.video_writer, codec_name = _create_video_writer(self.video_path, w, h, DEFAULT_FPS)
                 
-                success = False
-                for codec_name, desc in codecs:
-                    try:
-                        logger.info(f"Attempting to use {desc}")
-                        fourcc = cv2.VideoWriter_fourcc(*codec_name)
-                        
-                        # Create video writer
-                        self.video_writer = cv2.VideoWriter(
-                            self.video_path, 
-                            fourcc, 
-                            30.0,  # Assume 30 FPS
-                            (w, h)
-                        )
-                        
-                        # Check if writer opened successfully
-                        if self.video_writer.isOpened():
-                            logger.info(f"Successfully opened VideoWriter with {codec_name} codec")
-                            
-                            # Test write a single frame
-                            self.video_writer.write(test_frame)
-                            self.video_writer.release()
-                            
-                            # Check if file was created with content
-                            if os.path.exists(self.video_path) and os.path.getsize(self.video_path) > 0:
-                                logger.info(f"Test frame written successfully with {codec_name} codec")
-                                
-                                # Reopen the writer for further writing
-                                self.video_writer = cv2.VideoWriter(
-                                    self.video_path, 
-                                    fourcc, 
-                                    30.0,
-                                    (w, h)
-                                )
-                                
-                                if not self.video_writer.isOpened():
-                                    logger.error(f"Failed to reopen VideoWriter after test")
-                                    continue
-                                
-                                success = True
-                                break
-                            else:
-                                logger.error(f"Test frame write failed with {codec_name} codec")
-                        else:
-                            logger.error(f"Failed to open VideoWriter with {codec_name} codec")
-                            
-                    except Exception as codec_error:
-                        logger.error(f"Error with {codec_name} codec: {codec_error}")
-                
-                # If no codec worked, raise an error
-                if not success:
+                if self.video_writer is None:
                     raise RuntimeError("Failed to initialize video writer with any codec")
                 
                 # Write all existing frames
@@ -396,7 +440,7 @@ class IncrementalOratorySession:
                     self.video_writer.release()
                     
                     # Verify file exists and has content
-                    if os.path.exists(self.video_path) and os.path.getsize(self.video_path) > 100:  # Ensure it's not just headers
+                    if os.path.exists(self.video_path) and os.path.getsize(self.video_path) > MIN_VIDEO_FILE_SIZE:
                         logger.info(f"Video file created successfully: {self.video_path} ({os.path.getsize(self.video_path)} bytes)")
                         
                         # Reopen the writer for possible future writes
@@ -404,7 +448,7 @@ class IncrementalOratorySession:
                         self.video_writer = cv2.VideoWriter(
                             self.video_path,
                             fourcc,
-                            30.0,
+                            DEFAULT_FPS,
                             (w, h)
                         )
                     else:
@@ -519,41 +563,33 @@ class IncrementalOratorySession:
             frames_count = len(new_frames)
             logger.info(f"Processing {frames_count} new frames incrementally")
             
-            # Simplified frame analysis
-            # In a real implementation, this would perform actual CV analysis
-            # For now, we'll do basic simulated analysis
-            
-            # Simulate some analysis results
+            # Initialize results
             frame_results = {
                 "frames_analyzed": frames_count,
-                "frames_with_face": max(0, frames_count - randint(0, min(3, frames_count))),
+                "frames_with_face": 0,
                 "expressions": [],
                 "gestures": [],
                 "posture": []
             }
             
-            # Simulate detection of expressions and gestures
-            if frames_count > 5:
-                # Randomly detect some expressions
-                if random() > 0.7:
-                    expression = {
-                        "type": choice(["smile", "frown", "neutral", "surprised"]),
-                        "confidence": random() * 0.5 + 0.5,
-                        "frame_index": self.last_processed_frame_index + randint(0, frames_count-1)
-                    }
-                    frame_results["expressions"].append(expression)
-                    
-                # Randomly detect some gestures
-                if random() > 0.8:
-                    gesture = {
-                        "type": choice(["hand_movement", "head_nod", "pointing"]),
-                        "confidence": random() * 0.5 + 0.5,
-                        "frame_index": self.last_processed_frame_index + randint(0, frames_count-1)
-                    }
-                    frame_results["gestures"].append(gesture)
+            # For incremental processing, we do lightweight checks
+            # Full analysis happens in the final pipeline
+            # Here we can do basic face detection or skip for performance
+            
+            # Simple frame quality check - count non-empty frames
+            valid_frames = 0
+            for frame in new_frames:
+                if frame is not None and frame.size > 0:
+                    valid_frames += 1
+                    # Could add basic face detection here if needed
+                    # For now, assume frames with data are valid
+            
+            frame_results["frames_with_face"] = valid_frames
             
             # Update the last processed frame index
             self.last_processed_frame_index += frames_count
+            
+            logger.debug(f"Lightweight frame analysis: {valid_frames}/{frames_count} valid frames")
             
             return frame_results
             
@@ -561,14 +597,15 @@ class IncrementalOratorySession:
             logger.error(f"Error processing new frames: {e}", exc_info=True)
             return {}
     
-    def _process_audio_buffer(self) -> Dict[str, Any]:
+    async def _process_audio_buffer(self) -> Dict[str, Any]:
         """
         Process accumulated audio buffer with REAL speech analysis using Whisper and VAD.
+        This method is async to avoid blocking the event loop during transcription.
         
         Returns:
             Dict with audio analysis results
         """
-        if len(self.analysis_audio_buffer) < 32000:  # Need at least 1 second of audio (16kHz * 2 bytes)
+        if len(self.analysis_audio_buffer) < MIN_AUDIO_FOR_TRANSCRIPTION:
             return {}
             
         try:
@@ -576,14 +613,14 @@ class IncrementalOratorySession:
             audio_np = np.frombuffer(
                 self.analysis_audio_buffer, 
                 dtype=np.int16
-            ).astype(np.float32) / 32768.0
+            ).astype(np.float32) / AUDIO_NORMALIZATION_FACTOR
             
             # Calculate audio duration
-            audio_duration = len(audio_np) / 16000.0
+            audio_duration = len(audio_np) / float(AUDIO_SAMPLE_RATE)
             logger.info(f"Processing {audio_duration:.2f} seconds of audio with REAL analysis")
             
             # 1. VAD - Voice Activity Detection and pause analysis
-            segments = self.speech_segmenter.get_speech_segments(audio_np, 16000)
+            segments = self.speech_segmenter.get_speech_segments(audio_np, AUDIO_SAMPLE_RATE)
             pause_analysis = self.speech_segmenter.analyze_pauses(segments)
             
             speech_detected = pause_analysis.get("speech_percent", 0) > 10
@@ -615,11 +652,17 @@ class IncrementalOratorySession:
                     os.close(temp_wav_fd)
                     
                     # Write WAV file
-                    wav.write(temp_wav_path, 16000, (audio_np * 32768).astype(np.int16))
+                    wav.write(temp_wav_path, AUDIO_SAMPLE_RATE, (audio_np * AUDIO_NORMALIZATION_FACTOR).astype(np.int16))
                     
-                    # Transcribe using Whisper
-                    logger.info(f"Transcribing audio segment with Whisper")
-                    transcript_result = transcribe_wav(temp_wav_path, lang="es")
+                    # Transcribe using Whisper in executor to avoid blocking event loop
+                    logger.info(f"Transcribing audio segment with Whisper (async)")
+                    loop = asyncio.get_event_loop()
+                    transcript_result = await loop.run_in_executor(
+                        self.executor, 
+                        transcribe_wav, 
+                        temp_wav_path, 
+                        "es"
+                    )
                     
                     # Clean up temp file
                     try:
@@ -669,8 +712,8 @@ class IncrementalOratorySession:
                     logger.error(f"Error in transcription: {transcription_error}", exc_info=True)
             
             # Clear the analysis audio buffer for next iteration
-            # Keep some overlap (last 0.5 seconds) for continuity
-            overlap_bytes = int(0.5 * 16000 * 2)  # 0.5 seconds
+            # Keep some overlap for continuity
+            overlap_bytes = int(AUDIO_OVERLAP_SECONDS * AUDIO_SAMPLE_RATE * AUDIO_BYTES_PER_SAMPLE)
             if len(self.analysis_audio_buffer) > overlap_bytes:
                 self.analysis_audio_buffer = bytearray(self.analysis_audio_buffer[-overlap_bytes:])
             else:
@@ -787,8 +830,8 @@ class IncrementalOratorySession:
                 # Process new frames
                 frame_results = self._process_new_frames()
                 
-                # Process audio buffer if we have enough data
-                audio_results = self._process_audio_buffer()
+                # Process audio buffer if we have enough data (async to avoid blocking)
+                audio_results = await self._process_audio_buffer()
                 
                 # Update accumulated state
                 self._update_accumulated_state(frame_results, audio_results)
@@ -1004,7 +1047,7 @@ class IncrementalOratorySession:
 
     
             
-    def _create_result_from_incremental_data(self) -> Dict[str, Any]:
+    def _create_result_from_incremental_data(self) -> AnalysisResult:
         """
         Create a result structure using only the incrementally collected data.
         Used as a fallback when the final pipeline fails.
@@ -1013,47 +1056,29 @@ class IncrementalOratorySession:
             Dict with feedback data from incremental analysis
         """
         try:
-            # Verificar que accumulated_state y sus campos necesarios existan
-            if not hasattr(self, "accumulated_state") or self.accumulated_state is None:
-                logger.error("accumulated_state no está disponible")
-                return {
-                    "status": "error",
-                    "error": "No incremental data available",
-                    "timestamp": time.time()
-                }
-                
-            # Calculate total duration - con verificación de nulidad
-            start_time = self.accumulated_state.get("start_time", time.time() - 10)  # Default a 10 segundos atrás
+            # Get accumulated state with defaults
+            acc_state = self.accumulated_state or {}
+            metrics = acc_state.get("metrics", {})
+            verbal = acc_state.get("verbal", {})
+            nonverbal = acc_state.get("nonverbal", {})
+            
+            # Calculate total duration
+            start_time = acc_state.get("start_time", time.time() - 10)
             duration_sec = time.time() - start_time
             
-            # Obtener métricas con valores predeterminados seguros
-            metrics = {}
-            if "metrics" in self.accumulated_state and self.accumulated_state["metrics"] is not None:
-                metrics = self.accumulated_state["metrics"]
-            
-            # Valores predeterminados para métricas en caso de que no existan
+            # Extract metrics with defaults
             wpm = metrics.get("wpm", 0.0)
             fillers_per_min = metrics.get("fillers_per_min", 0.0)
             pause_rate = metrics.get("pause_rate", 0.0)
             gesture_rate = metrics.get("gesture_rate", 0.0)
             expression_variability = metrics.get("expression_variability", 0.0)
             
-            # Verificar audio_buffer y all_frames
-            audio_buffer_length = 0
-            if hasattr(self, "audio_buffer") and self.audio_buffer is not None:
-                audio_buffer_length = len(self.audio_buffer)
-                
-            all_frames_length = 0
-            if hasattr(self, "all_frames") and self.all_frames is not None:
-                all_frames_length = len(self.all_frames)
-                
-            partial_results_length = 0
-            if hasattr(self, "partial_results") and self.partial_results is not None:
-                partial_results_length = len(self.partial_results)
-            
-            # Obtener datos procesados con valores predeterminados seguros
-            frames_processed = self.accumulated_state.get("frames_processed", 0)
-            audio_processed_sec = self.accumulated_state.get("audio_processed_sec", 0.0)
+            # Get buffer/frame counts safely
+            audio_buffer_length = len(self.audio_buffer) if hasattr(self, "audio_buffer") else 0
+            all_frames_length = len(self.all_frames) if hasattr(self, "all_frames") else 0
+            partial_results_length = len(self.partial_results) if hasattr(self, "partial_results") else 0
+            frames_processed = acc_state.get("frames_processed", 0)
+            audio_processed_sec = acc_state.get("audio_processed_sec", 0.0)
             
             # Create a result structure similar to what process_pipeline_results would return
             result = {
@@ -1090,40 +1115,31 @@ class IncrementalOratorySession:
                 "timestamp": time.time()
             }
             
-            # Convert accumulated fillers and gestures to events - con verificaciones de nulidad
-            if ("verbal" in self.accumulated_state and 
-                self.accumulated_state["verbal"] is not None and
-                "filler_instances" in self.accumulated_state["verbal"] and
-                self.accumulated_state["verbal"]["filler_instances"] is not None):
-                
-                for filler in self.accumulated_state["verbal"]["filler_instances"]:
-                    if isinstance(filler, dict) and "time" in filler and "type" in filler:
-                        result["events"].append({
-                            "time": filler["time"],
-                            "kind": "filler",
-                            "label": filler["type"],
-                            "duration": filler.get("duration", 0.3)
-                        })
-                        
-                        # Count fillers by type
-                        filler_type = filler["type"]
-                        if filler_type not in result["verbal"]["filler_counts"]:
-                            result["verbal"]["filler_counts"][filler_type] = 0
-                        result["verbal"]["filler_counts"][filler_type] += 1
+            # Convert accumulated fillers to events
+            filler_instances = verbal.get("filler_instances", [])
+            for filler in filler_instances:
+                if isinstance(filler, dict) and "time" in filler and "type" in filler:
+                    result["events"].append({
+                        "time": filler["time"],
+                        "kind": "filler",
+                        "label": filler["type"],
+                        "duration": filler.get("duration", 0.3)
+                    })
+                    
+                    # Count fillers by type
+                    filler_type = filler["type"]
+                    result["verbal"]["filler_counts"][filler_type] = result["verbal"]["filler_counts"].get(filler_type, 0) + 1
             
-            if ("nonverbal" in self.accumulated_state and 
-                self.accumulated_state["nonverbal"] is not None and
-                "gestures" in self.accumulated_state["nonverbal"] and
-                self.accumulated_state["nonverbal"]["gestures"] is not None):
-                
-                for gesture in self.accumulated_state["nonverbal"]["gestures"]:
-                    if isinstance(gesture, dict) and "type" in gesture:
-                        result["events"].append({
-                            "time": gesture.get("frame_index", 0) / 30,  # Assuming 30 FPS
-                            "kind": "gesture",
-                            "label": gesture["type"],
-                            "confidence": gesture.get("confidence", 0.8)
-                        })
+            # Convert accumulated gestures to events
+            gestures = nonverbal.get("gestures", [])
+            for gesture in gestures:
+                if isinstance(gesture, dict) and "type" in gesture:
+                    result["events"].append({
+                        "time": gesture.get("frame_index", 0) / DEFAULT_FPS,
+                        "kind": "gesture",
+                        "label": gesture["type"],
+                        "confidence": gesture.get("confidence", 0.8)
+                    })
             
             return result
             
@@ -1135,7 +1151,7 @@ class IncrementalOratorySession:
                 "timestamp": time.time()
             }
         
-    def _enhance_result_with_incremental_data(self, result: Dict[str, Any]) -> Dict[str, Any]:
+    def _enhance_result_with_incremental_data(self, result: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Enhance the final analysis result with data from incremental processing.
         
@@ -1145,84 +1161,46 @@ class IncrementalOratorySession:
         Returns:
             Enhanced result with incremental data
         """
-        # Verificar que result no sea None para evitar el error 'NoneType' object does not support item assignment
+        # Ensure result exists
         if result is None:
-            logger.warning("_enhance_result_with_incremental_data received None result, creating empty result")
-            result = {
-                "status": "error",
-                "error": "No analysis result was generated",
-                "timestamp": time.time()
+            logger.warning("Received None result, creating empty result")
+            result = {"status": "error", "error": "No analysis result was generated", "timestamp": time.time()}
+        
+        # Add debug info about incremental processing
+        result.setdefault("quality", {}).setdefault("debug", {})
+        debug = result["quality"]["debug"]
+        debug["incremental_processing"] = True
+        debug["incremental_steps"] = len(self.partial_results) if hasattr(self, "partial_results") else 0
+        debug["total_frames_received"] = len(self.all_frames) if hasattr(self, "all_frames") else 0
+        
+        # Add missing incremental fillers to events
+        try:
+            # Get existing filler times from result
+            result_filler_times = {
+                round(event["time"], 1)
+                for event in result.get("events", [])
+                if event.get("kind") == "filler" and "time" in event
             }
             
-        # Usar el campo debug existente para información incremental adicional
-        # para evitar problemas con el DTO del backend
-        try:
-            # Asegurar que quality y debug existan
-            if "quality" not in result:
-                result["quality"] = {}
-            if "debug" not in result["quality"]:
-                result["quality"]["debug"] = {}
-                
-            debug = result["quality"]["debug"]
-            debug["incremental_processing"] = True
+            # Add incremental fillers that are missing
+            acc_state = self.accumulated_state or {}
+            verbal = acc_state.get("verbal", {})
+            filler_instances = verbal.get("filler_instances", [])
             
-            # Verificar si partial_results existe y no es None
-            if hasattr(self, "partial_results") and self.partial_results is not None:
-                debug["incremental_steps"] = len(self.partial_results)
-            else:
-                debug["incremental_steps"] = 0
-                
-            # Verificar si all_frames existe y no es None
-            if hasattr(self, "all_frames") and self.all_frames is not None:
-                debug["total_frames_received"] = len(self.all_frames)
-            else:
-                debug["total_frames_received"] = 0
-        except Exception as debug_error:
-            logger.error(f"Error setting debug fields: {debug_error}")
-            # Intentar crear la estructura de forma segura
-            try:
-                if "quality" not in result:
-                    result["quality"] = {}
-                if "debug" not in result["quality"]:
-                    result["quality"]["debug"] = {}
-                result["quality"]["debug"]["incremental_processing"] = True
-                result["quality"]["debug"]["incremental_steps"] = 0
-                result["quality"]["debug"]["total_frames_received"] = 0
-            except Exception:
-                # Si incluso esto falla, simplemente continuar
-                pass
-        
-        # If any filler events were detected incrementally but are missing in the final result, add them
-        try:
-            result_filler_times = set()
-            for event in result.get("events", []):
-                if event.get("kind") == "filler" and "time" in event:
-                    result_filler_times.add(round(event["time"], 1))
-            
-            # Add any incremental fillers that might have been missed
-            # Verificar primero que accumulated_state y sus subcampos existan
-            if (self.accumulated_state and 
-                "verbal" in self.accumulated_state and 
-                self.accumulated_state["verbal"] is not None and
-                "filler_instances" in self.accumulated_state["verbal"] and 
-                self.accumulated_state["verbal"]["filler_instances"] is not None):
-                
-                for filler in self.accumulated_state["verbal"]["filler_instances"]:
-                    if isinstance(filler, dict) and "time" in filler:
-                        rounded_time = round(filler["time"], 1)
-                        if rounded_time not in result_filler_times:
-                            if "events" not in result:
-                                result["events"] = []
-                            result["events"].append({
-                                "time": filler["time"],
-                                "kind": "filler",
-                                "label": filler.get("type", "um"),
-                                "duration": filler.get("duration", 0.3),
-                                "source": "incremental"  # Mark the source as incremental
-                            })
-        except Exception as filler_error:
-            logger.error(f"Error processing fillers: {filler_error}")
-            # No es necesario tomar ninguna acción adicional, simplemente evitar errores
+            result.setdefault("events", [])
+            for filler in filler_instances:
+                if isinstance(filler, dict) and "time" in filler:
+                    rounded_time = round(filler["time"], 1)
+                    if rounded_time not in result_filler_times:
+                        result["events"].append({
+                            "time": filler["time"],
+                            "kind": "filler",
+                            "label": filler.get("type", "um"),
+                            "duration": filler.get("duration", 0.3),
+                            "source": "incremental"
+                        })
+        except Exception as e:
+            logger.error(f"Error processing fillers: {e}")
         
         return result
     
@@ -1397,15 +1375,23 @@ async def handle_incremental_oratory_feedback(
                                     "timestamp": time.time()
                                 }
                             
-                            # Send the result to the REST endpoint
-                            asyncio.create_task(send_analysis_result(user_id, result))
-                            
-                            # Send final status to client
-                            await websocket.send_json({
-                                "status": "completed",
-                                "message": "Análisis completado exitosamente",
-                                "timestamp": time.time()
-                            })
+                            # Send the result to the REST endpoint and wait for completion
+                            try:
+                                await send_analysis_result(user_id, result)
+                                # Send final status to client
+                                await websocket.send_json({
+                                    "status": "completed",
+                                    "message": "Análisis completado exitosamente",
+                                    "timestamp": time.time()
+                                })
+                            except Exception as send_error:
+                                logger.error(f"Failed to save analysis to backend: {send_error}")
+                                await websocket.send_json({
+                                    "status": "completed_with_warning",
+                                    "message": "Análisis completado pero no se pudo guardar en el servidor",
+                                    "error": str(send_error),
+                                    "timestamp": time.time()
+                                })
                             
                             # Close websocket after sending final result
                             await websocket.close(code=1000, reason="Analysis completed")
@@ -1455,15 +1441,22 @@ async def handle_incremental_oratory_feedback(
                                 "timestamp": time.time()
                             }
                             
-                        # Send to REST endpoint
-                        asyncio.create_task(send_analysis_result(user_id, result))
-                        
-                        # Notify client
-                        await websocket.send_json({
-                            "status": "completed",
-                            "message": "Análisis completado por inactividad",
-                            "timestamp": time.time()
-                        })
+                        # Send to REST endpoint and wait for completion
+                        try:
+                            await send_analysis_result(user_id, result)
+                            # Notify client
+                            await websocket.send_json({
+                                "status": "completed",
+                                "message": "Análisis completado por inactividad",
+                                "timestamp": time.time()
+                            })
+                        except Exception as send_error:
+                            logger.error(f"Failed to save analysis to backend after timeout: {send_error}")
+                            await websocket.send_json({
+                                "status": "completed_with_warning",
+                                "message": "Análisis completado por inactividad pero no se pudo guardar",
+                                "timestamp": time.time()
+                            })
                     else:
                         await websocket.send_json({
                             "status": "closed",
@@ -1492,8 +1485,11 @@ async def handle_incremental_oratory_feedback(
                         "timestamp": time.time()
                     }
                 
-                asyncio.create_task(send_analysis_result(user_id, result))
-                logger.info(f"Analysis completed after disconnect for user {user_id}")
+                try:
+                    await send_analysis_result(user_id, result)
+                    logger.info(f"Analysis completed and saved after disconnect for user {user_id}")
+                except Exception as send_error:
+                    logger.error(f"Failed to save analysis after disconnect: {send_error}")
             except Exception as e:
                 logger.error(f"Failed to complete analysis after disconnect: {e}")
                 

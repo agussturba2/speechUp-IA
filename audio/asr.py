@@ -9,9 +9,38 @@ import os
 import logging
 import time
 import traceback
-from typing import Dict, Optional, Any, List, Tuple
 import tempfile
-import subprocess
+import statistics
+from typing import Dict, Optional, Any, List, Tuple
+
+# Optional imports with graceful fallbacks
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    torch = None
+
+try:
+    import whisper
+    WHISPER_AVAILABLE = True
+except ImportError:
+    WHISPER_AVAILABLE = False
+    whisper = None
+
+try:
+    import ffmpeg
+    FFMPEG_AVAILABLE = True
+except ImportError:
+    FFMPEG_AVAILABLE = False
+    ffmpeg = None
+
+try:
+    import wave
+    WAVE_AVAILABLE = True
+except ImportError:
+    WAVE_AVAILABLE = False
+    wave = None
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +51,26 @@ MAX_WINDOW_SEC = float(os.getenv("SPEECHUP_ASR_MAX_WINDOW_SEC", "20"))
 # Debug flag
 DEBUG_ASR = os.getenv("SPEECHUP_DEBUG_ASR", "0") == "1"
 
+# Confidence calculation constants
+CONFIDENCE_LOGPROB_WEIGHT = 0.7
+CONFIDENCE_NOSPEECH_WEIGHT = 0.3
+LOGPROB_MIN_THRESHOLD = -2.5
+LOGPROB_MAX_THRESHOLD = 0.0
+LOGPROB_RANGE = 2.5  # abs(LOGPROB_MIN_THRESHOLD - LOGPROB_MAX_THRESHOLD)
+NO_SPEECH_THRESHOLD = 0.6  # Used in transcribe
+SEGMENT_VALIDATION_THRESHOLD = 0.95  # Max no_speech_prob for valid segment
+DEFAULT_AVG_LOGPROB = -0.8
+DEFAULT_NO_SPEECH_PROB = 0.5
+PSEUDO_SEGMENT_LOGPROB = -0.6
+PSEUDO_SEGMENT_NO_SPEECH = 0.4
+FALLBACK_CONFIDENCE = 0.3
+TOP_K_MIN_SEGMENTS = 4
+TOP_K_RATIO = 0.5
+
+# Model cache to avoid reloading
+_model_cache: Dict[str, Any] = {}
+_device_cache: Optional[str] = None
+
 def _log_debug(msg):
     if DEBUG_ASR:
         logger.debug(msg)
@@ -31,20 +80,29 @@ def _log_info(msg):
         logger.info(msg)
 
 def _get_device_info() -> str:
+    """Get device info with caching to avoid repeated checks."""
+    global _device_cache
+    
+    if _device_cache is not None:
+        return _device_cache
+    
     # Allow override
     device_env = os.getenv("WHISPER_DEVICE", None)
     if device_env in {"cpu", "cuda", "mps"}:
-        return device_env
-    try:
-        import torch
+        _device_cache = device_env
+        return _device_cache
+    
+    if TORCH_AVAILABLE and torch is not None:
         if torch.cuda.is_available():
-            return "cuda"
+            _device_cache = "cuda"
         elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-            return "mps"
+            _device_cache = "mps"
         else:
-            return "cpu"
-    except ImportError:
-        return "cpu"
+            _device_cache = "cpu"
+    else:
+        _device_cache = "cpu"
+    
+    return _device_cache
 
 def _get_optimal_model(device: str) -> str:
     """
@@ -69,10 +127,30 @@ def _get_optimal_model(device: str) -> str:
 
 
 
+def _get_or_load_model(model_name: str, device: str, cache_dir: str):
+    """Get cached model or load it if not in cache."""
+    cache_key = f"{model_name}_{device}"
+    
+    if cache_key not in _model_cache:
+        if not WHISPER_AVAILABLE or whisper is None:
+            raise ImportError("Whisper is not available")
+        
+        _log_info(f"Loading Whisper model '{model_name}' on device '{device}' (first time, will be cached)")
+        _model_cache[cache_key] = whisper.load_model(model_name, download_root=cache_dir, device=device)
+        _log_debug(f"Model '{model_name}' loaded and cached with key '{cache_key}'")
+    else:
+        _log_debug(f"Using cached Whisper model '{cache_key}'")
+    
+    return _model_cache[cache_key]
+
+
 def trim_wav_segment(src_wav: str, dst_wav: str, t_start: float = 0.0, t_dur: float = 20.0) -> bool:
     """Trim a WAV file to a segment using ffmpeg. Returns True if successful."""
+    if not FFMPEG_AVAILABLE or ffmpeg is None:
+        _log_debug("ffmpeg not available")
+        return False
+    
     try:
-        import ffmpeg
         (
             ffmpeg
             .input(src_wav, ss=t_start, t=t_dur)
@@ -86,8 +164,11 @@ def trim_wav_segment(src_wav: str, dst_wav: str, t_start: float = 0.0, t_dur: fl
         return False
 
 def get_wav_duration(wav_path: str) -> float:
+    """Get WAV file duration in seconds."""
+    if not WAVE_AVAILABLE or wave is None:
+        return 0.0
+    
     try:
-        import wave
         with wave.open(wav_path, 'rb') as wf:
             return wf.getnframes() / wf.getframerate()
     except Exception:
@@ -109,7 +190,8 @@ def transcribe_wav(wav_path: str, lang: Optional[str] = None) -> Dict[str, Any]:
     temp_trim = None
     
     try:
-        import whisper
+        if not WHISPER_AVAILABLE or whisper is None:
+            raise ImportError("Whisper library is not installed")
         
         # Get duration and handle trimming
         duration_sec = get_wav_duration(wav_path)
@@ -128,10 +210,14 @@ def transcribe_wav(wav_path: str, lang: Optional[str] = None) -> Dict[str, Any]:
         if DEBUG_ASR:
             logger.info(f"ASR enabled: model={used_model}, device={used_device}, duration={duration_sec:.2f}s, used_window={used_window:.2f}s")
         
-        # Load model and transcribe
+        # Load or get cached model
         start = time.time()
-        model = whisper.load_model(used_model, download_root=cache_dir, device=used_device)
-        _log_debug(f"Loaded Whisper model '{used_model}' on device '{used_device}'")
+        model = _get_or_load_model(used_model, used_device, cache_dir)
+        load_time = time.time() - start
+        _log_debug(f"Model ready in {load_time:.3f}s")
+        
+        # Transcribe
+        transcribe_start = time.time()
         
         # Transcribe with language handling
         result = model.transcribe(
@@ -139,8 +225,9 @@ def transcribe_wav(wav_path: str, lang: Optional[str] = None) -> Dict[str, Any]:
             language=lang,  # Can be None for auto-detection
             task="transcribe",
             verbose=False,
-            no_speech_threshold=0.6
+            no_speech_threshold=NO_SPEECH_THRESHOLD
         )
+        transcribe_time = time.time() - transcribe_start
         elapsed = time.time() - start
         
         # Preserve transcript fidelity - only strip whitespace
@@ -159,7 +246,7 @@ def transcribe_wav(wav_path: str, lang: Optional[str] = None) -> Dict[str, Any]:
         if DEBUG_ASR:
             logger.info(f"ASR transcript (first 120 chars): {raw_text[:120]}")
             logger.info(f"STT confidence: {stt_conf:.3f}")
-            logger.info(f"ASR completed in {elapsed:.2f}s")
+            logger.info(f"ASR completed in {elapsed:.2f}s (transcribe: {transcribe_time:.2f}s)")
         
         return {
             "ok": True,
@@ -180,7 +267,7 @@ def transcribe_wav(wav_path: str, lang: Optional[str] = None) -> Dict[str, Any]:
         return {
             "ok": False,
             "error": error,
-            "stt_confidence": 0.3,
+            "stt_confidence": FALLBACK_CONFIDENCE,
             "debug": {
                 "avg_logprob_mean": None,
                 "no_speech_prob_min": None,
@@ -226,26 +313,26 @@ def _compute_real_stt_confidence(segments: List[dict], used_device: str, used_mo
             
             # Set defaults if metrics are missing
             if avg_logprob is None:
-                avg_logprob = -0.8
+                avg_logprob = DEFAULT_AVG_LOGPROB
             if no_speech_prob is None:
-                no_speech_prob = 0.5
+                no_speech_prob = DEFAULT_NO_SPEECH_PROB
             
             # Very permissive validation: segment is valid if it has text OR low no_speech_prob
-            if seg_text or no_speech_prob < 0.95:
+            if seg_text or no_speech_prob < SEGMENT_VALIDATION_THRESHOLD:
                 valid_segments.append(segment)
                 lp_vals.append(avg_logprob)
                 nsp_vals.append(no_speech_prob)
         
         # If there are still ZERO valid segments BUT text_len > 0 (we clearly transcribed something),
-        # fabricate ONE pseudo-segment to prevent confidence from collapsing to 0.30 fallback
+        # fabricate ONE pseudo-segment to prevent confidence from collapsing to fallback
         if not valid_segments and text_len > 0:
             # Create pseudo-segment with reasonable defaults
-            lp_vals = [-0.6]  # Moderate confidence
-            nsp_vals = [0.4]  # Moderate speech probability
-            valid_segments = [{"text": "pseudo", "avg_logprob": -0.6, "no_speech_prob": 0.4}]
+            lp_vals = [PSEUDO_SEGMENT_LOGPROB]  # Moderate confidence
+            nsp_vals = [PSEUDO_SEGMENT_NO_SPEECH]  # Moderate speech probability
+            valid_segments = [{"text": "pseudo", "avg_logprob": PSEUDO_SEGMENT_LOGPROB, "no_speech_prob": PSEUDO_SEGMENT_NO_SPEECH}]
         
         if not valid_segments:
-            return 0.3, {
+            return FALLBACK_CONFIDENCE, {
                 "avg_logprob_median": None,
                 "avg_logprob_mean": None,
                 "no_speech_prob_median": None,
@@ -253,7 +340,7 @@ def _compute_real_stt_confidence(segments: List[dict], used_device: str, used_mo
                 "no_speech_prob_max": None,
                 "no_speech_prob_mean": None,
                 "lp_norm": None,
-                "conf_final": 0.3,
+                "conf_final": FALLBACK_CONFIDENCE,
                 "num_segments": 0,
                 "device": used_device,
                 "model": used_model,
@@ -261,9 +348,9 @@ def _compute_real_stt_confidence(segments: List[dict], used_device: str, used_mo
                 "k": 0
             }
         
-        # Compute robust statistics using medians
-        lp_med = sorted(lp_vals)[len(lp_vals) // 2] if lp_vals else -1.0
-        nsp_med = sorted(nsp_vals)[len(nsp_vals) // 2] if nsp_vals else 1.0
+        # Compute robust statistics using medians (efficient with statistics module)
+        lp_med = statistics.median(lp_vals) if lp_vals else -1.0
+        nsp_med = statistics.median(nsp_vals) if nsp_vals else 1.0
         
         # Also compute means for reporting
         lp_mean = sum(lp_vals) / len(lp_vals) if lp_vals else -1.0
@@ -271,35 +358,35 @@ def _compute_real_stt_confidence(segments: List[dict], used_device: str, used_mo
         nsp_min = min(nsp_vals) if nsp_vals else None
         nsp_max = max(nsp_vals) if nsp_vals else None
         
-        # Normalize logprob from [-2.5, 0] to [0, 1] (clip before scaling)
-        lp_clipped = max(-2.5, min(0.0, lp_med))
-        lp_norm = (lp_clipped + 2.5) / 2.5
+        # Normalize logprob from [LOGPROB_MIN_THRESHOLD, LOGPROB_MAX_THRESHOLD] to [0, 1] (clip before scaling)
+        lp_clipped = max(LOGPROB_MIN_THRESHOLD, min(LOGPROB_MAX_THRESHOLD, lp_med))
+        lp_norm = (lp_clipped - LOGPROB_MIN_THRESHOLD) / LOGPROB_RANGE
         
-        # Final confidence (robust blend): 70% from logprob, 30% from no_speech_prob
-        stt_conf_robust = max(0.0, min(1.0, 0.7 * lp_norm + 0.3 * (1.0 - nsp_med)))
+        # Final confidence (robust blend): weighted combination of logprob and no_speech_prob
+        stt_conf_robust = max(0.0, min(1.0, CONFIDENCE_LOGPROB_WEIGHT * lp_norm + CONFIDENCE_NOSPEECH_WEIGHT * (1.0 - nsp_med)))
         
-        # Optional top-k fallback if there are >=4 segments
+        # Optional top-k fallback if there are enough segments
         stt_conf_topk = stt_conf_robust
         used_topk = False
         k = 0
         
-        if len(valid_segments) >= 4:
-            k = max(2, int((len(valid_segments) * 0.5) + 0.5))  # ceil equivalent
+        if len(valid_segments) >= TOP_K_MIN_SEGMENTS:
+            k = max(2, int((len(valid_segments) * TOP_K_RATIO) + 0.5))  # ceil equivalent
             # Get top-k segments by highest avg_logprob
             segment_lp_pairs = list(zip(valid_segments, lp_vals))
             segment_lp_pairs.sort(key=lambda x: x[1], reverse=True)  # Sort by logprob descending
             top_k_segments = segment_lp_pairs[:k]
             top_k_lp_vals = [pair[1] for pair in top_k_segments]
             
-            # Compute median of top-k
-            top_k_lp_med = sorted(top_k_lp_vals)[len(top_k_lp_vals) // 2] if top_k_lp_vals else lp_med
+            # Compute median of top-k (efficient with statistics module)
+            top_k_lp_med = statistics.median(top_k_lp_vals) if top_k_lp_vals else lp_med
             
             # Normalize top-k logprob
-            top_k_lp_clipped = max(-2.5, min(0.0, top_k_lp_med))
-            top_k_lp_norm = (top_k_lp_clipped + 2.5) / 2.5
+            top_k_lp_clipped = max(LOGPROB_MIN_THRESHOLD, min(LOGPROB_MAX_THRESHOLD, top_k_lp_med))
+            top_k_lp_norm = (top_k_lp_clipped - LOGPROB_MIN_THRESHOLD) / LOGPROB_RANGE
             
             # Compute top-k confidence
-            stt_conf_topk = max(0.0, min(1.0, 0.7 * top_k_lp_norm + 0.3 * (1.0 - nsp_med)))
+            stt_conf_topk = max(0.0, min(1.0, CONFIDENCE_LOGPROB_WEIGHT * top_k_lp_norm + CONFIDENCE_NOSPEECH_WEIGHT * (1.0 - nsp_med)))
             used_topk = True
         
         # Choose the better of robust-median score and top-k score
@@ -326,7 +413,7 @@ def _compute_real_stt_confidence(segments: List[dict], used_device: str, used_mo
         
     except Exception as e:
         logger.warning(f"Error computing STT confidence: {e}")
-        return 0.3, {
+        return FALLBACK_CONFIDENCE, {
             "avg_logprob_median": None,
             "avg_logprob_mean": None,
             "no_speech_prob_median": None,
@@ -334,7 +421,7 @@ def _compute_real_stt_confidence(segments: List[dict], used_device: str, used_mo
             "no_speech_prob_max": None,
             "no_speech_prob_mean": None,
             "lp_norm": None,
-            "conf_final": 0.3,
+            "conf_final": FALLBACK_CONFIDENCE,
             "num_segments": 0,
             "device": used_device,
             "model": used_model,

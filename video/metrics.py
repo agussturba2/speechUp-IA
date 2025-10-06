@@ -6,9 +6,7 @@ from .advice_generator import AdviceGenerator
 
 
 def build_metrics_response(
-    feedbacks: List[Dict],
     media: Dict,
-    gesture_events: int,
     events: List[Dict],
     analysis_ms: int,
     verbal: Dict = None,
@@ -35,7 +33,6 @@ def build_metrics_response(
     gesture_rate_per_min = gesture_events * 60 / duration_sec if duration_sec > 0 else 0.0
     
     import os
-    min_floor = 0
     try:
         min_floor = int(os.getenv("MIN_NONVERBAL_SCORE_FLOOR", "0"))
     except Exception:

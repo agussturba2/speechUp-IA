@@ -18,7 +18,7 @@ from .audio_utils import extract_wav_mono_16k, compute_vad_segments, compute_pau
 from .scoring import compute_scores
 from audio.asr import transcribe_wav
 from audio.text_metrics import compute_wpm, detect_spanish_fillers, normalize_fillers_per_minute
-from audio.prosody import compute_prosody_metrics, compute_prosody_metrics_from_path
+from audio.prosody import compute_prosody_metrics_from_path
 
 # Custom exceptions for better error handling
 class AudioProcessingError(Exception):
