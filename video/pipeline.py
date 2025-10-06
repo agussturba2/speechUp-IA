@@ -33,6 +33,13 @@ def clamp(val: float, lo: float, hi: float) -> float:
     """Clamp value between lo and hi."""
     return max(lo, min(hi, val))
 
+def _get_face_center_from_holistic(face_landmarks) -> tuple:
+    """Extract face center coordinates from holistic face landmarks."""
+    if not face_landmarks:
+        return None, None
+    nose = face_landmarks.landmark[0]  # Nose tip as face center proxy
+    return nose.x, nose.y
+
 def compute_posture_openness(pose_landmarks, frame_width: int) -> float:
     """Compute posture openness based on shoulder span."""
     if not pose_landmarks:
@@ -106,6 +113,20 @@ def compute_expression_variability(face_landmarks) -> float:
         return 0.0  # Safe default
 
 def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
+    """
+    Run complete video analysis pipeline with optimized MediaPipe processing.
+    
+    Performance optimizations:
+    - Uses single mp_holistic for face/pose/hands (eliminates redundant mp_face)
+    - Organized accumulators for better data locality
+    - Samples at ~10fps to balance accuracy vs speed
+    
+    Args:
+        video_path: Path to video file
+        
+    Returns:
+        Dictionary containing comprehensive analysis results
+    """
     t0 = time.time()
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -131,21 +152,19 @@ def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
     dropped_frames_pct = 0.0
     media = {}
 
-    # Accumulators for nonverbal metrics
-    face_center_dist_sum = 0.0
-    head_motion_sum = 0.0
-    hand_motion_magnitude_sum = 0.0
+    # Accumulators for nonverbal metrics (organized for clarity)
+    accumulators = {
+        'face_center_dist': 0.0,
+        'head_motion': 0.0,
+        'hand_motion_magnitude': 0.0,
+        'posture_openness': 0.0,
+        'expression_variability': 0.0,
+    }
     prev_head = None
     prev_hands = None
     
-    # New accumulators for improved metrics
-    posture_openness_sum = 0.0
-    expression_variability_sum = 0.0
-    
     # Gesture event detection constants
     WARMUP_SEC = 0.5  # ignore first 0.5s
-    # Models
-    mp_face = mp.solutions.face_detection.FaceDetection(min_detection_confidence=0.5)
     mp_holistic = mp.solutions.holistic.Holistic(static_image_mode=False, model_complexity=0)
     mp_face_mesh = mp.solutions.face_mesh.FaceMesh(
         static_image_mode=False,
@@ -188,10 +207,8 @@ def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
     confirmed_events = []
     gesture_buckets = {}
     
-    # Motion magnitude tracking for gesture detection
-    motion_magnitudes = []  # per-frame motion magnitude
-    face_presence = []      # per-frame face presence
-    frame_timestamps = []   # per-frame timestamps
+    # Face detection tracking
+    has_face = False
 
     while True:
         ret, frame = cap.read()
@@ -206,38 +223,38 @@ def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
         h, w = frame.shape[:2]
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        # Face detection
-        face_res = mp_face.process(rgb)
-        if face_res.detections:
-            frames_with_face += 1
-            bbox = face_res.detections[0].location_data.relative_bounding_box
-            cx = bbox.xmin + bbox.width / 2.0
-            cy = bbox.ymin + bbox.height / 2.0
-            face_center_dist_sum += float(np.hypot(cx - 0.5, cy - 0.5))
-
-        # Holistic analysis (pose + hands)
+        # Holistic analysis (pose + hands + face detection)
         hol = mp_holistic.process(rgb)
         
         # Face mesh for expression analysis
         face_mesh_res = mp_face_mesh.process(rgb)
+        
+        # Face detection from holistic face landmarks
+        has_face = hol.face_landmarks is not None
+        if has_face:
+            frames_with_face += 1
+            # Calculate face center from nose landmark
+            nose = hol.face_landmarks.landmark[0]  # Nose tip
+            cx, cy = nose.x, nose.y
+            accumulators['face_center_dist'] += float(np.hypot(cx - 0.5, cy - 0.5))
 
         # Posture analysis
         if hol.pose_landmarks:
             posture_openness_val = compute_posture_openness(hol.pose_landmarks, w)
-            posture_openness_sum += posture_openness_val
+            accumulators['posture_openness'] += posture_openness_val
             
             # Head motion tracking
             nose = hol.pose_landmarks.landmark[mp.solutions.holistic.PoseLandmark.NOSE]
             head = np.array([nose.x, nose.y], dtype=np.float32)
             if prev_head is not None:
-                head_motion_sum += float(np.linalg.norm(head - prev_head))
+                accumulators['head_motion'] += float(np.linalg.norm(head - prev_head))
             prev_head = head
 
         # Expression analysis
         if face_mesh_res.multi_face_landmarks:
             face_landmarks = face_mesh_res.multi_face_landmarks[0]
             expression_var = compute_expression_variability(face_landmarks)
-            expression_variability_sum += expression_var
+            accumulators['expression_variability'] += expression_var
 
         # Hand motion and gesture detection with windowing FSM
         left = hol.left_hand_landmarks
@@ -262,15 +279,10 @@ def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
             if prev_hands is not None:
                 # Calculate motion delta
                 delta = float(np.linalg.norm(hands - prev_hands))
-                hand_motion_magnitude_sum += delta
+                accumulators['hand_motion_magnitude'] += delta
                 
                 # Compute current time in seconds for this frame
                 t_sec = idx / (fps or 30.0)
-                
-                # Store motion magnitude and face presence for gesture detection
-                motion_magnitudes.append(delta)
-                face_presence.append(bool(face_res.detections))
-                frame_timestamps.append(t_sec)
                 
                 # Gesture hysteresis state machine
                 if t_sec >= WARMUP_SEC:
@@ -280,12 +292,12 @@ def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
                             # Open window
                             gesture_active = True
                             gesture_start_idx = idx
-                            gesture_face_hits = 1 if bool(face_res.detections) else 0
+                            gesture_face_hits = 1 if has_face else 0
                             gesture_sum_amp = delta
                             gesture_n_amp = 1
                     else:
                         # Accumulate in active window
-                        gesture_face_hits += 1 if bool(face_res.detections) else 0
+                        gesture_face_hits += 1 if has_face else 0
                         gesture_sum_amp += delta
                         gesture_n_amp += 1
                         
@@ -374,14 +386,12 @@ def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
                 bucket_key = _bucket_key(start_t)
                 gesture_buckets[bucket_key] = gesture_buckets.get(bucket_key, 0) + 1
 
-    # Compute derived metrics
-    mean_face_center_dist = face_center_dist_sum / max(frames_with_face, 1)
-    normalized_head_motion = head_motion_sum / max(frames_with_face, 1)
-    hand_motion_magnitude_avg = hand_motion_magnitude_sum / max(sampled_frames, 1)
-    
-    # New nonverbal metrics
-    posture_openness = posture_openness_sum / max(sampled_frames, 1)
-    expression_variability = expression_variability_sum / max(sampled_frames, 1)
+    # Compute derived metrics (optimized from accumulators)
+    mean_face_center_dist = accumulators['face_center_dist'] / max(frames_with_face, 1)
+    normalized_head_motion = accumulators['head_motion'] / max(frames_with_face, 1)
+    hand_motion_magnitude_avg = accumulators['hand_motion_magnitude'] / max(sampled_frames, 1)
+    posture_openness = accumulators['posture_openness'] / max(sampled_frames, 1)
+    expression_variability = accumulators['expression_variability'] / max(sampled_frames, 1)
     
     # Comprehensive gesture statistics using confirmed events
     gesture_amplitudes = [e.get("amplitude", 0.0) for e in confirmed_events if e.get("amplitude")]
@@ -430,9 +440,7 @@ def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
 
     dropped_frames_pct = 0.0  # Placeholder for future implementation
 
-    # Event truncation configuration
-    MAX_EVENTS = int(os.getenv("SPEECHUP_MAX_EVENTS", "200"))
-    
+    # Build result dictionary
     proc = {
         "frames_total": frames_total,
         "frames_with_face": frames_with_face,
@@ -443,11 +451,7 @@ def run_analysis_pipeline(video_path: str) -> Dict[str, Any]:
         "events": confirmed_events[:MAX_EVENTS],  # Use confirmed events, truncate only at end
         "gesture_stats": gesture_stats,  # Include comprehensive stats
         "media": media,
-        # Accumulators for derived metrics
-        "face_center_dist_sum": face_center_dist_sum,
-        "head_motion_sum": head_motion_sum,
-        "hand_motion_magnitude_sum": hand_motion_magnitude_sum,
-        # Derived metrics
+        # Derived metrics (accumulators removed from output for cleaner API)
         "mean_face_center_dist": mean_face_center_dist,
         "normalized_head_motion": normalized_head_motion,
         "hand_motion_magnitude_avg": hand_motion_magnitude_avg,

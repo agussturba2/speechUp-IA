@@ -11,7 +11,6 @@ This module exports the main audio analysis components:
 """
 
 # Modular components
-from .extractors import AudioExtractor
 from .processors import AudioProcessor
 # from .prosody import ProsodyAnalyzer  # Removed - replaced with functional approach
 from .speech import SpeechSegmenter
@@ -21,7 +20,6 @@ from .asr import transcribe_wav, is_asr_enabled
 from .text_metrics import compute_wpm, detect_spanish_fillers, normalize_fillers_per_minute
 
 __all__ = [
-    "AudioExtractor",
     "AudioProcessor",
     "SpeechSegmenter",
     # ASR exports
