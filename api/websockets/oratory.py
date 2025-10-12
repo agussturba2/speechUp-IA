@@ -169,7 +169,7 @@ def process_pipeline_results(proc: Dict[str, Any], analysis_time: float) -> Dict
 
 # Función para enviar resultados al endpoint REST
 async def send_analysis_result(user_id: str, result: Dict[str, Any]):
-    url = "http://localhost:7070/session"
+    url = "http://98.91.55.213:7070/session"
     params = {"userId": user_id}
     try:
         async with httpx.AsyncClient() as client:
