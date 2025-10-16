@@ -514,10 +514,17 @@ def _process_video_frames_from_path(
     )
 
 
+@contextmanager
+def _existing_audio_path(path: str):
+    """Context manager that yields an existing audio path without cleanup."""
+    yield path
+
+
 def _process_audio_analysis(
     video_path: str,
     duration_sec: float,
-    config: PipelineConfig
+    config: PipelineConfig,
+    audio_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Process audio: extraction, VAD, ASR, prosody, and pause metrics.
@@ -559,7 +566,9 @@ def _process_audio_analysis(
     
     segments = []
     
-    with temp_wav_file(video_path) as wav_path:
+    audio_ctx = _existing_audio_path(audio_path) if audio_path else temp_wav_file(video_path)
+
+    with audio_ctx as wav_path:
         if not wav_path:
             logger.warning("Audio extraction failed for: %s", video_path)
             return result
@@ -680,7 +689,11 @@ def _process_audio_analysis(
     return result
 
 
-def run_analysis_pipeline(video_path: str, config: Optional[PipelineConfig] = None) -> Dict[str, Any]:
+def run_analysis_pipeline(
+    video_path: str,
+    config: Optional[PipelineConfig] = None,
+    audio_path: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Run complete video analysis pipeline with optimized MediaPipe processing.
     
@@ -734,7 +747,13 @@ def run_analysis_pipeline(video_path: str, config: Optional[PipelineConfig] = No
     with ThreadPoolExecutor(max_workers=2) as executor:
         # Submit both tasks
         video_future = executor.submit(_process_video_frames_from_path, video_path, config)
-        audio_future = executor.submit(_process_audio_analysis, video_path, duration_sec, config)
+        audio_future = executor.submit(
+            _process_audio_analysis,
+            video_path,
+            duration_sec,
+            config,
+            audio_path
+        )
         
         # Wait for both to complete
         video_results = video_future.result()

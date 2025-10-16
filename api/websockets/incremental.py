@@ -183,11 +183,14 @@ class IncrementalOratorySession:
             
             logger.info(f"Video verified: {frame_count} frames, {fps:.1f} FPS, {width}x{height}")
             
+            # Export accumulated audio buffer
+            audio_wav_path = self._coordinator.audio_processor.export_buffer_to_wav()
+
             # Run analysis pipeline
             logger.info("Running analysis pipeline")
             t0 = time.perf_counter()
             
-            proc = run_analysis_pipeline(str(video_path))
+            proc = run_analysis_pipeline(str(video_path), audio_path=audio_wav_path)
             analysis_time = time.perf_counter() - t0
             
             logger.info(f"Analysis completed in {analysis_time:.2f}s")
@@ -232,21 +235,33 @@ class IncrementalOratorySession:
                     "error_type": type(e).__name__,
                     "timestamp": time.time()
                 }
+        finally:
+            try:
+                if 'audio_wav_path' in locals() and audio_wav_path and os.path.exists(audio_wav_path):
+                    os.remove(audio_wav_path)
+                    logger.debug(f"Removed temporary audio file: {audio_wav_path}")
+            except Exception as cleanup_exc:
+                logger.warning(f"Failed to remove temporary audio file: {cleanup_exc}")
     
     def _enhance_with_incremental_data(self, result: Dict[str, Any]) -> Dict[str, Any]:
         """Enhance final result with incremental metrics."""
-        # Get metrics from coordinator
         metrics = self._coordinator.metrics_analyzer.get_metrics()
-        
-        # Add to debug info
-        if "quality" in result and "debug" in result["quality"]:
-            result["quality"]["debug"]["incremental_metrics"] = {
-                "wpm": round(metrics.wpm, 1),
-                "fillers_per_min": round(metrics.fillers_per_min, 2),
-                "gesture_rate": round(metrics.gesture_rate, 2),
-                "expression_variability": round(metrics.expression_variability, 2)
-            }
-        
+        if metrics is None:
+            return result
+
+        quality = result.setdefault("quality", {})
+        debug = quality.get("debug")
+        if not isinstance(debug, dict):
+            debug = {}
+            quality["debug"] = debug
+
+        debug["incremental_metrics"] = {
+            "wpm": round(metrics.wpm, 1),
+            "fillers_per_min": round(metrics.fillers_per_min, 2),
+            "gesture_rate": round(metrics.gesture_rate, 2),
+            "expression_variability": round(metrics.expression_variability, 2)
+        }
+
         return result
     
     def _create_fallback_result(self) -> Dict[str, Any]:

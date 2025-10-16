@@ -61,6 +61,7 @@ class AudioProcessor:
         self.audio_buffer_duration = 0.0
         self._buffer_offset = 0  # Track removed bytes
         self._last_processed_position = 0  # Track processing position
+        self._partial_sample = bytearray()
         
         # Processing components
         vad_mode = vad_mode or incremental_config.vad_mode
@@ -84,12 +85,27 @@ class AudioProcessor:
         """
         if not audio_data:
             return
-        
-        # Calculate duration
+
+        # Prepend any pending partial sample
+        if self._partial_sample:
+            audio_data = bytes(self._partial_sample) + audio_data
+            self._partial_sample.clear()
+
+        # Ensure data aligns to sample boundaries
+        remainder = len(audio_data) % self.bytes_per_sample
+        if remainder:
+            # Store leftover bytes for the next chunk
+            self._partial_sample.extend(audio_data[-remainder:])
+            audio_data = audio_data[:-remainder]
+
+        if not audio_data:
+            return
+
+        # Calculate duration for aligned data
         bytes_per_ms = self.sample_rate * self.bytes_per_sample // 1000
         duration_ms = len(audio_data) / float(bytes_per_ms)
         duration_sec = duration_ms / 1000.0
-        
+
         self.audio_buffer.extend(audio_data)
         self.audio_buffer_duration += duration_sec
         
@@ -97,14 +113,19 @@ class AudioProcessor:
         max_buffer_bytes = incremental_config.max_audio_buffer_bytes
         if len(self.audio_buffer) > max_buffer_bytes:
             bytes_to_remove = len(self.audio_buffer) - max_buffer_bytes
-            self._buffer_offset += bytes_to_remove
-            self.audio_buffer = bytearray(self.audio_buffer[bytes_to_remove:])
-            
-            # Adjust duration
-            removed_duration = bytes_to_remove / float(bytes_per_ms) / 1000.0
-            self.audio_buffer_duration = max(0, self.audio_buffer_duration - removed_duration)
-            
-            logger.debug(f"Audio buffer trimmed: removed {bytes_to_remove} bytes")
+            # Align removal to sample boundaries
+            remainder = bytes_to_remove % self.bytes_per_sample
+            if remainder:
+                bytes_to_remove -= remainder
+            if bytes_to_remove > 0:
+                self._buffer_offset += bytes_to_remove
+                self.audio_buffer = bytearray(self.audio_buffer[bytes_to_remove:])
+
+                # Adjust duration
+                removed_duration = bytes_to_remove / float(bytes_per_ms) / 1000.0
+                self.audio_buffer_duration = max(0, self.audio_buffer_duration - removed_duration)
+
+                logger.debug(f"Audio buffer trimmed: removed {bytes_to_remove} bytes")
     
     def get_unprocessed_bytes(self) -> int:
         """Get number of unprocessed audio bytes."""
@@ -127,7 +148,58 @@ class AudioProcessor:
             start_pos = self._last_processed_position
         
         return bytes(self.audio_buffer[start_pos:])
-    
+
+    def export_buffer_to_wav(self, output_path: Optional[str] = None) -> Optional[str]:
+        """Persist the accumulated audio buffer to a WAV file.
+
+        Args:
+            output_path: Optional destination path. If omitted, a temporary file is created.
+
+        Returns:
+            Path to the written WAV file, or None if the buffer is empty or the export fails.
+        """
+        if not self.audio_buffer and not self._partial_sample:
+            logger.debug("Audio buffer empty, skipping export")
+            return None
+
+        path = output_path
+        fd = None
+        try:
+            if path is None:
+                fd, path = tempfile.mkstemp(suffix=".wav")
+                os.close(fd)
+
+            buffer_bytes = bytes(self.audio_buffer)
+            if self._partial_sample:
+                logger.debug("Discarding %d pending partial bytes before export", len(self._partial_sample))
+            # Ensure alignment
+            remainder = len(buffer_bytes) % self.bytes_per_sample
+            if remainder:
+                logger.debug("Discarding %d trailing bytes to align samples during export", remainder)
+                buffer_bytes = buffer_bytes[:-remainder]
+
+            audio_np = np.frombuffer(buffer_bytes, dtype=np.int16)
+            if audio_np.size == 0:
+                logger.debug("Audio buffer contains no samples after conversion")
+                if output_path is None and path and os.path.exists(path):
+                    os.remove(path)
+                return None
+
+            wav.write(path, self.sample_rate, audio_np)
+            self._partial_sample.clear()
+            logger.info(f"Exported audio buffer to {path}")
+            return path
+
+        except Exception as e:
+            logger.error(f"Failed to export audio buffer: {e}", exc_info=True)
+            if output_path is None and path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+            return None
+
+
     async def process_audio(self, language: str = "es") -> Optional[AudioAnalysisResult]:
         """
         Process accumulated audio with VAD, transcription, and filler detection.
@@ -148,6 +220,13 @@ class AudioProcessor:
         try:
             # Get audio segment with overlap
             audio_segment = self.get_audio_segment(include_overlap=True)
+            remainder = len(audio_segment) % self.bytes_per_sample
+            if remainder:
+                logger.debug("Trimming %d trailing bytes from audio segment to preserve sample alignment", remainder)
+                audio_segment = audio_segment[:-remainder]
+            if not audio_segment:
+                logger.debug("Audio segment empty after alignment trimming")
+                return None
             
             # Convert to numpy array
             audio_np = np.frombuffer(
@@ -301,6 +380,7 @@ class AudioProcessor:
         self.audio_buffer_duration = 0.0
         self._buffer_offset = 0
         self._last_processed_position = 0
+        self._partial_sample.clear()
         logger.debug("AudioProcessor reset")
     
     def close(self) -> None:
