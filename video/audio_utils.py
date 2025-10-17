@@ -15,6 +15,8 @@ import webrtcvad
 import librosa
 from typing import List, Tuple, Dict, Optional
 
+from audio.prosody import apply_audio_prefiltering
+
 logger = logging.getLogger(__name__)
 
 DEBUG_VAD = os.getenv("SPEECHUP_DEBUG_VAD", "0") == "1"
@@ -163,8 +165,10 @@ def compute_vad_segments(wav_path: str):
         _log("empty audio")
         return []
 
+    y = apply_audio_prefiltering(y, sr=sr)
+
     # Normalize and hard clip very low levels
-    y = _normalize_gain(y, target_rms=0.05)
+    y = _normalize_gain(y, target_rms=0.02)
 
     segs = _collect_vad_segments(y, sr, aggressiveness=2, frame_ms=20)
     if not segs:
