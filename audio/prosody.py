@@ -34,6 +34,10 @@ PROSODY_HPF_HZ = int(os.getenv("SPEECHUP_PROSODY_HPF_HZ", "80"))
 F0_MIN = int(os.getenv("SPEECHUP_F0_MIN", "70"))
 F0_MAX = int(os.getenv("SPEECHUP_F0_MAX", "350"))
 F0_PROFILE = os.getenv("SPEECHUP_F0_PROFILE", "")
+VOICED_PROB_THRESHOLD = float(os.getenv("SPEECHUP_VOICED_PROB_THRESHOLD", "0.40"))
+PITCH_MEDIAN_WINDOW = int(os.getenv("SPEECHUP_PITCH_MEDIAN_WINDOW", "3"))
+if PITCH_MEDIAN_WINDOW % 2 == 0:
+    PITCH_MEDIAN_WINDOW += 1
 
 # Adjust F0 bounds based on profile
 if F0_PROFILE == "high":
@@ -190,8 +194,8 @@ def compute_pitch_hz_robust(y: np.ndarray, sr: int = SR) -> Tuple[np.ndarray, np
             fill_na=np.nan
         )
         
-        # Build voiced mask with lower threshold for flat speech
-        voiced_mask = (~np.isnan(f0_hz)) & (voiced_prob >= 0.60)
+        # Build voiced mask with configurable threshold for flat speech
+        voiced_mask = (~np.isnan(f0_hz)) & (voiced_prob >= VOICED_PROB_THRESHOLD)
         voiced_count_pyin = np.sum(voiced_mask)
         
         logger.debug(f"PYIN: {voiced_count_pyin} voiced frames with threshold 0.60")
@@ -222,11 +226,11 @@ def compute_pitch_hz_robust(y: np.ndarray, sr: int = SR) -> Tuple[np.ndarray, np
         
         if np.any(voiced_mask):
             # Apply median filter to reduce octave jumps
-            f0_filtered = apply_median_filter_nan(f0_hz, window_size=5)
+            f0_filtered = apply_median_filter_nan(f0_hz, window_size=PITCH_MEDIAN_WINDOW)
             
             # Recompute voiced mask after filtering
             if method_name == "pyin":
-                voiced_mask = (~np.isnan(f0_filtered)) & (voiced_prob >= 0.60)
+                voiced_mask = (~np.isnan(f0_filtered)) & (voiced_prob >= VOICED_PROB_THRESHOLD)
             else:
                 voiced_mask = f0_filtered > 0
             
