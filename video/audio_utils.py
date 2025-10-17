@@ -76,7 +76,7 @@ def _collect_vad_segments(y: np.ndarray, sr: int, aggressiveness: int = 2, frame
     # Merge tiny gaps and drop ultra-short segments
     merged = []
     min_dur = 0.08
-    join_gap = 0.12
+    join_gap = 0.05
     for seg in segments:
         if not merged:
             merged.append(seg)
@@ -184,7 +184,8 @@ def compute_vad_segments(wav_path: str):
         _log("no segments after cleanup → using full audio range")
         out.append({"start": 0.0, "end": float(dur)})
 
-    _log(f"final segments={len(out)}")
+    if DEBUG_VAD:
+        _log(f"final segments={len(out)} -> {out}")
     return out
 
 def check_ffmpeg():
