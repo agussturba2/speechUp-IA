@@ -28,7 +28,7 @@ def _rms(x: np.ndarray) -> float:
         return 0.0
     return float(np.sqrt(np.mean(np.square(x), dtype=np.float64)))
 
-def _normalize_gain(y: np.ndarray, target_rms: float = 0.05) -> np.ndarray:
+def _normalize_gain(y: np.ndarray, target_rms: float = 0.03) -> np.ndarray:
     """Simple gain normalization to avoid very low levels killing VAD."""
     cur = _rms(y)
     if cur <= 1e-9:
@@ -51,7 +51,7 @@ def _frame_generator(y: np.ndarray, sr: int, frame_ms: int = 20):
         if len(chunk) == frame_len * 2:
             yield chunk
 
-def _collect_vad_segments(y: np.ndarray, sr: int, aggressiveness: int = 2, frame_ms: int = 20):
+def _collect_vad_segments(y: np.ndarray, sr: int, aggressiveness: int = 3, frame_ms: int = 20):
     """WebRTC-VAD segmentation with simple hangover."""
     vad = webrtcvad.Vad(int(aggressiveness))
     segments = []
