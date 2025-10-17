@@ -3,6 +3,7 @@ Audio utilities for SpeechUp oratory analysis.
 Provides VAD (Voice Activity Detection) and pause metrics computation.
 """
 import os
+os.environ.setdefault("SPEECHUP_DEBUG_VAD", "1")
 import shutil
 import wave
 import tempfile
@@ -179,6 +180,10 @@ def compute_vad_segments(wav_path: str):
         if en > st:
             out.append({"start": st, "end": en})
 
+    if not out and dur > 0.0:
+        _log("no segments after cleanup → using full audio range")
+        out.append({"start": 0.0, "end": float(dur)})
+
     _log(f"final segments={len(out)}")
     return out
 
@@ -199,6 +204,13 @@ def compute_pause_metrics(segments: list, total_dur: float):
         total_dur = float(total_dur)
     except Exception:
         total_dur = 0.0
+
+    if total_dur <= 0:
+        try:
+            total_dur = max(float(s.get("end", 0.0)) for s in segments)
+        except ValueError:
+            total_dur = 0.0
+
     if total_dur <= 0:
         return {"avg_pause_sec": 0.0, "pause_rate_per_min": 0.0}
 
