@@ -627,7 +627,7 @@ def _process_audio_analysis(
                                     for e in segments if e.get("end", 0.0) > e.get("start", 0.0)) if segments else 0.0
                 logger.info("VAD segments: %s, speech_dur_sec: %.2fs", len(segments), speech_dur_sec)
                 
-                asr_result = transcribe_wav(wav_path, lang=None) or {}
+                asr_result = transcribe_wav(wav_path, lang="es") or {}
                 
                 if speech_dur_sec < 0.1:
                     speech_dur_sec = asr_result.get("duration_sec", 0.0)
