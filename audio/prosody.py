@@ -12,6 +12,8 @@ import os
 import librosa
 from typing import Dict, List, Tuple, Optional
 
+os.environ.setdefault("SPEECHUP_USE_PROSODY", "1")
+
 DEBUG_PROS = os.getenv("SPEECHUP_DEBUG_PROSODY", "0") == "1"
 def _plog(msg: str):
     if DEBUG_PROS:

@@ -27,7 +27,7 @@ def _rms(x: np.ndarray) -> float:
         return 0.0
     return float(np.sqrt(np.mean(np.square(x), dtype=np.float64)))
 
-def _normalize_gain(y: np.ndarray, target_rms: float = 0.03) -> np.ndarray:
+def _normalize_gain(y: np.ndarray, target_rms: float = 0.05) -> np.ndarray:
     """Simple gain normalization to avoid very low levels killing VAD."""
     cur = _rms(y)
     if cur <= 1e-9:
@@ -50,7 +50,7 @@ def _frame_generator(y: np.ndarray, sr: int, frame_ms: int = 20):
         if len(chunk) == frame_len * 2:
             yield chunk
 
-def _collect_vad_segments(y: np.ndarray, sr: int, aggressiveness: int = 1, frame_ms: int = 20):
+def _collect_vad_segments(y: np.ndarray, sr: int, aggressiveness: int = 2, frame_ms: int = 20):
     """WebRTC-VAD segmentation with simple hangover."""
     vad = webrtcvad.Vad(int(aggressiveness))
     segments = []
@@ -74,8 +74,8 @@ def _collect_vad_segments(y: np.ndarray, sr: int, aggressiveness: int = 1, frame
 
     # Merge tiny gaps and drop ultra-short segments
     merged = []
-    min_dur = 0.12
-    join_gap = 0.10
+    min_dur = 0.08
+    join_gap = 0.12
     for seg in segments:
         if not merged:
             merged.append(seg)
@@ -92,7 +92,7 @@ def _collect_vad_segments(y: np.ndarray, sr: int, aggressiveness: int = 1, frame
 def _fallback_energy_segments(y: np.ndarray, sr: int):
     """Energy-based fallback using librosa.effects.split."""
     # top_db: lower → more sensitive
-    intervals = librosa.effects.split(y, top_db=30, frame_length=1024, hop_length=256)
+    intervals = librosa.effects.split(y, top_db=25, frame_length=1024, hop_length=256)
     segments = []
     for (s_i, e_i) in intervals:
         start = s_i / sr
@@ -163,9 +163,9 @@ def compute_vad_segments(wav_path: str):
         return []
 
     # Normalize and hard clip very low levels
-    y = _normalize_gain(y, target_rms=0.03)
+    y = _normalize_gain(y, target_rms=0.05)
 
-    segs = _collect_vad_segments(y, sr, aggressiveness=1, frame_ms=20)
+    segs = _collect_vad_segments(y, sr, aggressiveness=2, frame_ms=20)
     if not segs:
         _log("webrtc empty → fallback energy")
         segs = _fallback_energy_segments(y, sr)

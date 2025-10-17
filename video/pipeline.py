@@ -623,24 +623,28 @@ def _process_audio_analysis(
         # ASR
         if (config.use_audio or config.use_asr) and wav_path:
             try:
-                speech_dur_sec = sum((e.get("end", 0.0) - e.get("start", 0.0)) 
+                speech_dur_sec = sum((e.get("end", 0.0) - e.get("start", 0.0))
                                     for e in segments if e.get("end", 0.0) > e.get("start", 0.0)) if segments else 0.0
                 logger.info("VAD segments: %s, speech_dur_sec: %.2fs", len(segments), speech_dur_sec)
                 
                 asr_result = transcribe_wav(wav_path, lang="es") or {}
                 
                 if speech_dur_sec < 0.1:
-                    speech_dur_sec = asr_result.get("duration_sec", 0.0)
+                    speech_dur_sec = float(asr_result.get("duration_sec", 0.0))
                 
                 if asr_result.get("ok"):
                     text = asr_result.get("text", "") or ""
                     dur = float(asr_result.get("duration_sec") or duration_sec or 0.0)
                     
-                    wpm = compute_wpm(text, dur) if dur > 0 else 0.0
+                    effective_dur = speech_dur_sec if speech_dur_sec > 0 else dur
+                    wpm = compute_wpm(text, effective_dur) if effective_dur > 0 else 0.0
                     fillers = detect_spanish_fillers(text) or {"fillers_per_min": 0.0, "filler_counts": {}}
                     fillers_pm = normalize_fillers_per_minute(fillers.get("fillers_per_min", 0.0), dur) if dur > 0 else 0.0
                     
                     full_text = asr_result.get("text", "") or ""
+                    warnings = []
+                    if speech_dur_sec <= 0.0 and dur > 0:
+                        warnings.append("speech_duration_missing")
                     result["verbal"].update({
                         "wpm": float(wpm),
                         "fillers_per_min": float(fillers_pm),
@@ -648,6 +652,9 @@ def _process_audio_analysis(
                         "stt_confidence": float(asr_result.get("stt_confidence", 0.0)),
                         "transcript_len": len(full_text),
                         "transcript_short": full_text[:config.transcript_preview_max] if full_text else None,
+                        "speech_duration_sec": float(speech_dur_sec),
+                        "dur_inferred_sec": float(dur),
+                        "warnings": warnings,
                     })
                     
                     if config.include_full_transcript:
