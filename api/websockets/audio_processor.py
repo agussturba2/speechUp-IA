@@ -246,7 +246,7 @@ class AudioProcessor:
             # Remove DC offset if present (center around 0)
             dc_offset = audio_np.mean()
             if abs(dc_offset) > 0.01:  # Threshold for normalized audio
-                logger.info(f"Removing DC offset: {dc_offset:.4f}")
+                logger.error(f"[DC OFFSET CORRECTION] Removing DC offset: {dc_offset:.4f}")
                 audio_np = audio_np - dc_offset
             
             audio_duration = len(audio_np) / float(self.sample_rate)
