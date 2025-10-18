@@ -193,6 +193,15 @@ class AudioProcessor:
                 if output_path is None and path and os.path.exists(path):
                     os.remove(path)
                 return None
+            
+            # Remove DC offset before exporting (fix clipping issues)
+            dc_offset = audio_np.mean()
+            logger.error(f"[EXPORT WAV] DC offset before correction: {dc_offset:.2f}")
+            
+            if abs(dc_offset) > 1000:  # Significant DC offset
+                logger.error(f"[EXPORT WAV] Removing DC offset: {dc_offset:.0f}")
+                audio_np = audio_np - int(dc_offset)
+                logger.error(f"[EXPORT WAV] After correction: mean={audio_np.mean():.2f}, min={audio_np.min()}, max={audio_np.max()}")
 
             wav.write(path, self.sample_rate, audio_np)
             self._partial_sample.clear()
