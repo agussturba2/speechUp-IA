@@ -320,7 +320,8 @@ class AudioProcessor:
                 words, fillers = await self._transcribe_and_analyze(
                     audio_np, 
                     audio_duration, 
-                    language
+                    language,
+                    audio_int16_corrected
                 )
             
             # Update processing position
@@ -345,7 +346,8 @@ class AudioProcessor:
         self,
         audio_np: np.ndarray,
         audio_duration: float,
-        language: str
+        language: str,
+        audio_int16_corrected: np.ndarray
     ) -> tuple[List[Word], List[FillerInstance]]:
         """
         Transcribe audio and analyze for fillers.
@@ -354,6 +356,7 @@ class AudioProcessor:
             audio_np: Audio as numpy array
             audio_duration: Duration in seconds
             language: Language code
+            audio_int16_corrected: DC-corrected int16 audio for WAV export
             
         Returns:
             Tuple of (words, fillers)
