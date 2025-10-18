@@ -105,7 +105,10 @@ class SessionCoordinator:
         Returns:
             IncrementalUpdate with current metrics and status
         """
+        logger.error(f"process_incremental called: frame_count={self.video_manager.frame_count}")
+        
         if self.analysis_in_progress:
+            logger.error("Analysis already in progress, skipping")
             return IncrementalUpdate(
                 status=AnalysisStatus.ANALYZING,
                 frames_processed=self.video_manager.frame_count,
@@ -118,6 +121,7 @@ class SessionCoordinator:
         
         try:
             if not self.enable_incremental:
+                logger.error("Incremental processing disabled, returning status only")
                 # Simple status update without processing
                 result = IncrementalUpdate(
                     status=AnalysisStatus.PROCESSING,
@@ -130,14 +134,20 @@ class SessionCoordinator:
                 return result
             
             # Process audio
+            logger.error("Processing audio...")
             audio_result = await self.audio_processor.process_audio()
             if audio_result:
+                logger.error(f"Audio result: wpm={audio_result.wpm if hasattr(audio_result, 'wpm') else 'N/A'}")
                 self.metrics_analyzer.update_from_audio(audio_result)
             
             # Process frames (lightweight check for now)
+            logger.error(f"Calling _process_new_frames(), last_processed={self.last_processed_frame_index}")
             frame_result = self._process_new_frames()
             if frame_result:
+                logger.error(f"Frame result: {frame_result.frames_analyzed} frames analyzed")
                 self.metrics_analyzer.update_from_frames(frame_result)
+            else:
+                logger.error("No frame result returned")
             
             # Get computed metrics
             metrics = self.metrics_analyzer.get_metrics()
