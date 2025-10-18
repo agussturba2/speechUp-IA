@@ -137,7 +137,7 @@ class SessionCoordinator:
             logger.error("Processing audio...")
             audio_result = await self.audio_processor.process_audio()
             if audio_result:
-                logger.error(f"Audio result: wpm={audio_result.wpm if hasattr(audio_result, 'wpm') else 'N/A'}")
+                logger.error(f"Audio result: {len(audio_result.words)} words, {len(audio_result.fillers)} fillers, {audio_result.duration_sec:.2f}s, speech={audio_result.speech_detected}")
                 self.metrics_analyzer.update_from_audio(audio_result)
             
             # Process frames (lightweight check for now)
@@ -152,6 +152,7 @@ class SessionCoordinator:
             # Get computed metrics
             metrics = self.metrics_analyzer.get_metrics()
             confidence = self.metrics_analyzer.get_confidence()
+            logger.error(f"Computed metrics: wpm={metrics.wpm:.1f}, fillers={metrics.fillers_per_min:.2f}, gestures={metrics.gesture_rate:.1f}, expressions={metrics.expression_variability:.2f}")
             
             # Build incremental update
             result = IncrementalUpdate(
