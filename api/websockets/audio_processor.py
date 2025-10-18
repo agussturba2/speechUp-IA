@@ -373,6 +373,12 @@ class AudioProcessor:
             logger.error(f"[AUDIO BEFORE WAV WRITE] shape={audio_int16_corrected.shape}, dtype={audio_int16_corrected.dtype}, min={audio_int16_corrected.min()}, max={audio_int16_corrected.max()}, mean={audio_int16_corrected.mean():.2f}, std={audio_int16_corrected.std():.2f}")
             wav.write(temp_wav_path, self.sample_rate, audio_int16_corrected)
             
+            # DEBUG: Save a copy for manual inspection
+            import shutil
+            debug_path = "/tmp/debug_audio_latest.wav"
+            shutil.copy(temp_wav_path, debug_path)
+            logger.error(f"[DEBUG] Saved audio copy to {debug_path} for manual inspection")
+            
             # Transcribe using Whisper (async)
             logger.info("Transcribing audio with Whisper (async)")
             loop = asyncio.get_event_loop()
