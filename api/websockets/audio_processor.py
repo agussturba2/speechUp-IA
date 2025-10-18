@@ -90,7 +90,10 @@ class AudioProcessor:
         if len(self.audio_buffer) == 0 and len(audio_data) >= 100:
             import numpy as np
             sample_data = np.frombuffer(audio_data[:100], dtype=np.int16)
-            logger.error(f"[AUDIO RECEIVED FROM CLIENT] first_chunk_size={len(audio_data)} bytes, first_50_samples: min={sample_data.min()}, max={sample_data.max()}, mean={sample_data.mean():.2f}, std={sample_data.std():.2f}")
+            dc_offset = sample_data.mean()
+            logger.error(f"[AUDIO RECEIVED FROM CLIENT] first_chunk_size={len(audio_data)} bytes, first_50_samples: min={sample_data.min()}, max={sample_data.max()}, mean={dc_offset:.2f}, std={sample_data.std():.2f}")
+            if abs(dc_offset) > 1000:
+                logger.error(f"⚠️ LARGE DC OFFSET DETECTED: {dc_offset:.0f} - Audio may need centering")
 
         # Prepend any pending partial sample
         if self._partial_sample:
@@ -239,6 +242,12 @@ class AudioProcessor:
                 audio_segment,
                 dtype=np.int16
             ).astype(np.float32) / self.normalization_factor
+            
+            # Remove DC offset if present (center around 0)
+            dc_offset = audio_np.mean()
+            if abs(dc_offset) > 0.01:  # Threshold for normalized audio
+                logger.info(f"Removing DC offset: {dc_offset:.4f}")
+                audio_np = audio_np - dc_offset
             
             audio_duration = len(audio_np) / float(self.sample_rate)
             logger.info(f"Processing {audio_duration:.2f}s of audio")
