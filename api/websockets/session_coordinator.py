@@ -188,7 +188,7 @@ class SessionCoordinator:
             return None
         
         frames_count = len(new_frames)
-        logger.debug(f"Processing {frames_count} new frames with FrameAnalyzer")
+        logger.info(f"Processing {frames_count} new frames with FrameAnalyzer")
         
         # Filter valid frames
         valid_frames = [
@@ -211,7 +211,7 @@ class SessionCoordinator:
             
             self.last_processed_frame_index = len(all_frames)
             
-            logger.debug(
+            logger.info(
                 f"Frame analysis: {result.frames_with_face} faces, "
                 f"{len(result.expressions)} expressions, {len(result.gestures)} gestures"
             )
