@@ -21,6 +21,7 @@ os.environ.setdefault("SPEECHUP_F0_MAX", "350")
 os.environ.setdefault("SPEECHUP_F0_PROFILE", "")
 os.environ.setdefault("SPEECHUP_VOICED_PROB_THRESHOLD", "0.40")
 os.environ.setdefault("SPEECHUP_PITCH_MEDIAN_WINDOW", "3")
+os.environ.setdefault("SPEECHUP_FORCE_YIN", "1")
 
 DEBUG_PROS = os.getenv("SPEECHUP_DEBUG_PROSODY", "0") == "1"
 def _plog(msg: str):
@@ -45,6 +46,7 @@ VOICED_PROB_THRESHOLD = float(os.getenv("SPEECHUP_VOICED_PROB_THRESHOLD", "0.40"
 PITCH_MEDIAN_WINDOW = int(os.getenv("SPEECHUP_PITCH_MEDIAN_WINDOW", "3"))
 if PITCH_MEDIAN_WINDOW % 2 == 0:
     PITCH_MEDIAN_WINDOW += 1
+FORCE_YIN = int(os.getenv("SPEECHUP_FORCE_YIN", "1"))
 
 # Adjust F0 bounds based on profile
 if F0_PROFILE == "high":
@@ -177,7 +179,7 @@ def apply_median_filter_nan(data: np.ndarray, window_size: int = 5) -> np.ndarra
 
 def compute_pitch_hz_robust(y: np.ndarray, sr: int = SR) -> Tuple[np.ndarray, np.ndarray, str]:
     """
-    Compute robust pitch (F0) in Hz using pyin with yin fallback for low-energy speech.
+    Compute robust pitch (F0) in Hz using yin (or pyin if FORCE_YIN=0).
     
     Args:
         y: Audio array (pre-filtered)
@@ -189,63 +191,97 @@ def compute_pitch_hz_robust(y: np.ndarray, sr: int = SR) -> Tuple[np.ndarray, np
     try:
         import librosa
         
-        # Primary method: librosa.pyin with Hz parameters
-        f0_hz, voiced_flag, voiced_prob = librosa.pyin(
-            y, 
-            fmin=70.0, 
-            fmax=350.0, 
-            sr=sr, 
-            frame_length=WIN, 
-            hop_length=HOP, 
-            center=True,
-            fill_na=np.nan
-        )
-        
-        # Build voiced mask with configurable threshold for flat speech
-        voiced_mask = (~np.isnan(f0_hz)) & (voiced_prob >= VOICED_PROB_THRESHOLD)
-        voiced_count_pyin = np.sum(voiced_mask)
-        
-        # Debug: check raw pyin output
-        if voiced_count_pyin > 0:
-            raw_voiced_f0 = f0_hz[voiced_mask]
-            _plog(f"Raw PYIN: {voiced_count_pyin} frames, unique={len(np.unique(raw_voiced_f0))}, "
-                  f"min={np.nanmin(raw_voiced_f0):.2f}Hz, max={np.nanmax(raw_voiced_f0):.2f}Hz, std={np.nanstd(raw_voiced_f0):.2f}Hz")
-        
-        logger.debug(f"PYIN: {voiced_count_pyin} voiced frames with threshold {VOICED_PROB_THRESHOLD}")
-        
-        # Fallback method: librosa.yin ONLY if no voiced frames with pyin
-        if voiced_count_pyin == 0:
-            f0_yin = librosa.yin(
-                y, fmin=70.0, fmax=350.0,
-                sr=sr, frame_length=WIN, hop_length=HOP, center=True
+        # Use YIN by default to avoid pyin constant pitch bug
+        if FORCE_YIN:
+            _plog("Using YIN method (forced) for pitch detection")
+            f0_hz = librosa.yin(
+                y, 
+                fmin=70.0, 
+                fmax=350.0,
+                sr=sr, 
+                frame_length=WIN, 
+                hop_length=HOP, 
+                center=True
             )
-            # yin returns array of F0 (Hz)
-            voiced_mask_yin = f0_yin > 0
-            voiced_count_yin = np.sum(voiced_mask_yin)
+            voiced_mask = f0_hz > 0
+            voiced_count = np.sum(voiced_mask)
             
-            logger.debug(f"YIN fallback: {voiced_count_yin} voiced frames")
+            # Debug: check raw YIN output
+            if voiced_count > 0:
+                raw_voiced_f0 = f0_hz[voiced_mask]
+                _plog(f"Raw YIN: {voiced_count} frames, unique={len(np.unique(raw_voiced_f0))}, "
+                      f"min={np.nanmin(raw_voiced_f0):.2f}Hz, max={np.nanmax(raw_voiced_f0):.2f}Hz, std={np.nanstd(raw_voiced_f0):.2f}Hz")
             
-            if voiced_count_yin > 0:
-                f0_hz = f0_yin
-                voiced_mask = voiced_mask_yin
-                method_name = "yin"
-                logger.debug(f"Selected YIN fallback method with {voiced_count_yin} voiced frames")
-            else:
-                method_name = "pyin"
-                logger.debug("No voiced frames with either method")
+            method_name = "yin"
+            logger.debug(f"YIN: {voiced_count} voiced frames")
+            
         else:
+            # Original PYIN method
+            _plog("Using PYIN method for pitch detection")
+            f0_hz, voiced_flag, voiced_prob = librosa.pyin(
+                y, 
+                fmin=70.0, 
+                fmax=350.0, 
+                sr=sr, 
+                frame_length=WIN, 
+                hop_length=HOP, 
+                center=True,
+                fill_na=np.nan
+            )
+            
+            # Build voiced mask with configurable threshold for flat speech
+            voiced_mask = (~np.isnan(f0_hz)) & (voiced_prob >= VOICED_PROB_THRESHOLD)
+            voiced_count_pyin = np.sum(voiced_mask)
+            
+            # Debug: check raw pyin output
+            if voiced_count_pyin > 0:
+                raw_voiced_f0 = f0_hz[voiced_mask]
+                _plog(f"Raw PYIN: {voiced_count_pyin} frames, unique={len(np.unique(raw_voiced_f0))}, "
+                      f"min={np.nanmin(raw_voiced_f0):.2f}Hz, max={np.nanmax(raw_voiced_f0):.2f}Hz, std={np.nanstd(raw_voiced_f0):.2f}Hz")
+            
+            logger.debug(f"PYIN: {voiced_count_pyin} voiced frames with threshold {VOICED_PROB_THRESHOLD}")
             method_name = "pyin"
-            logger.debug(f"Selected PYIN method with {voiced_count_pyin} voiced frames")
+            voiced_count = voiced_count_pyin
+        
+        # Fallback: use opposite method if no voiced frames
+        if voiced_count == 0:
+            if not FORCE_YIN:
+                # Try YIN as fallback
+                _plog("No frames with primary method, trying alternative")
+                f0_hz = librosa.yin(
+                    y, fmin=70.0, fmax=350.0,
+                    sr=sr, frame_length=WIN, hop_length=HOP, center=True
+                )
+                voiced_mask = f0_hz > 0
+                voiced_count = np.sum(voiced_mask)
+                method_name = "yin"
+                logger.debug(f"YIN fallback: {voiced_count} voiced frames")
+            else:
+                # Try PYIN as fallback
+                _plog("No frames with YIN, trying PYIN fallback")
+                f0_hz, voiced_flag, voiced_prob = librosa.pyin(
+                    y, fmin=70.0, fmax=350.0, sr=sr, 
+                    frame_length=WIN, hop_length=HOP, center=True, fill_na=np.nan
+                )
+                voiced_mask = (~np.isnan(f0_hz)) & (voiced_prob >= VOICED_PROB_THRESHOLD)
+                voiced_count = np.sum(voiced_mask)
+                method_name = "pyin"
+                logger.debug(f"PYIN fallback: {voiced_count} voiced frames")
         
         if np.any(voiced_mask):
             # Apply median filter to reduce octave jumps
             f0_filtered = apply_median_filter_nan(f0_hz, window_size=PITCH_MEDIAN_WINDOW)
             
             # Recompute voiced mask after filtering
-            if method_name == "pyin":
-                voiced_mask = (~np.isnan(f0_filtered)) & (voiced_prob >= VOICED_PROB_THRESHOLD)
-            else:
+            if method_name == "yin":
                 voiced_mask = f0_filtered > 0
+            else:
+                # pyin case - need to handle NaN
+                try:
+                    voiced_mask = (~np.isnan(f0_filtered)) & (voiced_prob >= VOICED_PROB_THRESHOLD)
+                except NameError:
+                    # voiced_prob not defined in YIN-only path
+                    voiced_mask = ~np.isnan(f0_filtered)
             
             # Log voiced frame statistics
             voiced_count = np.sum(voiced_mask)
