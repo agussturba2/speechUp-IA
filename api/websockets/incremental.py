@@ -247,8 +247,13 @@ class IncrementalOratorySession:
         """Enhance final result with incremental metrics."""
         metrics = self._coordinator.metrics_analyzer.get_metrics()
         if metrics is None:
+            logger.warning("No incremental metrics available")
             return result
 
+        logger.info(f"Enhancing with incremental data: wpm={metrics.wpm:.1f}, fillers={metrics.fillers_per_min:.2f}, "
+                   f"gesture_rate={metrics.gesture_rate:.2f}, expression_var={metrics.expression_variability:.2f}")
+
+        # Store in debug
         quality = result.setdefault("quality", {})
         debug = quality.get("debug")
         if not isinstance(debug, dict):
@@ -261,6 +266,49 @@ class IncrementalOratorySession:
             "gesture_rate": round(metrics.gesture_rate, 2),
             "expression_variability": round(metrics.expression_variability, 2)
         }
+
+        # Override main metrics with incremental data if they are more reliable
+        verbal = result.setdefault("verbal", {})
+        
+        # Use incremental WPM if pipeline returned 0 or very low value
+        pipeline_wpm = verbal.get("wpm", 0.0)
+        if metrics.wpm > 0 and (pipeline_wpm == 0 or metrics.wpm > pipeline_wpm * 1.5):
+            logger.info(f"Overriding WPM: pipeline={pipeline_wpm:.1f} -> incremental={metrics.wpm:.1f}")
+            verbal["wpm"] = round(metrics.wpm, 1)
+            
+            # Recalculate articulation rate if we override WPM
+            syll_per_word_es = 2.3
+            verbal["articulation_rate_sps"] = round((metrics.wpm * syll_per_word_es) / 60.0, 2)
+        
+        # Use incremental fillers if available
+        if metrics.fillers_per_min > 0:
+            logger.info(f"Overriding fillers: pipeline={verbal.get('fillers_per_min', 0):.2f} -> incremental={metrics.fillers_per_min:.2f}")
+            verbal["fillers_per_min"] = round(metrics.fillers_per_min, 2)
+        
+        # Override nonverbal metrics with incremental data
+        nonverbal = result.setdefault("nonverbal", {})
+        
+        if metrics.gesture_rate > 0:
+            logger.info(f"Overriding gesture_rate: pipeline={nonverbal.get('gesture_rate_per_min', 0):.2f} -> incremental={metrics.gesture_rate:.2f}")
+            nonverbal["gesture_rate_per_min"] = round(metrics.gesture_rate, 2)
+        
+        if metrics.expression_variability > 0:
+            logger.info(f"Overriding expression_variability: pipeline={nonverbal.get('expression_variability', 0):.2f} -> incremental={metrics.expression_variability:.2f}")
+            nonverbal["expression_variability"] = round(metrics.expression_variability, 2)
+
+        # Recalculate scores with updated metrics
+        from video.scoring import compute_scores
+        
+        analysis_data = {
+            "verbal": verbal,
+            "prosody": result.get("prosody", {}),
+            "nonverbal": nonverbal
+        }
+        
+        logger.info("Recalculating scores with enhanced metrics")
+        recalculated_scores = compute_scores(analysis_data)
+        result["scores"] = recalculated_scores
+        logger.info(f"Scores recalculated: {recalculated_scores}")
 
         return result
     
@@ -560,13 +608,19 @@ async def handle_incremental_oratory_feedback(
                     break
                     
     except WebSocketDisconnect:
-        logger.info("WebSocket client disconnected")
+        logger.info(f"WebSocket client disconnected (session exists: {session is not None})")
         
         # If we received frames, complete the analysis
+        if ses<sion:
+            logger.info(f"Session frame_count: {session.frame_count}")
+            
         if session and session.frame_count > 0:
             try:
+                logger.info(f"Starting final analysis for user {user_id} with {session.frame_count} frames")
                 session.end_stream()
+                logger.info("Stream ended, generating final feedback...")
                 result = await session.generate_final_feedback()
+                logger.info("Final feedback generated successfully")
                 
                 # Verificar que el resultado no sea None
                 if result is None:
@@ -578,12 +632,18 @@ async def handle_incremental_oratory_feedback(
                     }
                 
                 try:
+                    logger.info(f"Sending analysis result to backend for user {user_id}")
                     await send_analysis_result(user_id, result)
                     logger.info(f"Analysis completed and saved after disconnect for user {user_id}")
                 except Exception as send_error:
                     logger.error(f"Failed to save analysis after disconnect: {send_error}")
             except Exception as e:
-                logger.error(f"Failed to complete analysis after disconnect: {e}")
+                logger.error(f"Failed to complete analysis after disconnect: {e}", exc_info=True)
+        else:
+            if session:
+                logger.warning(f"No frames received (frame_count={session.frame_count}), skipping final analysis")
+            else:
+                logger.warning("Session is None, skipping final analysis")
                 
     except Exception as e:
         logger.error(f"WebSocket error: {e}", exc_info=True)
