@@ -12,6 +12,7 @@ from pathlib import Path
 from .audio_processor import AudioProcessor
 from .video_buffer_manager import VideoBufferManager
 from .metrics_analyzer import MetricsAnalyzer
+from .frame_analyzer import FrameAnalyzer, AnalyzerConfig
 from .models import IncrementalUpdate, AnalysisStatus, FrameAnalysisResult
 from .config import config as incremental_config
 
@@ -37,6 +38,7 @@ class SessionCoordinator:
         audio_processor: Optional[AudioProcessor] = None,
         video_manager: Optional[VideoBufferManager] = None,
         metrics_analyzer: Optional[MetricsAnalyzer] = None,
+        frame_analyzer: Optional[FrameAnalyzer] = None,
         enable_incremental: bool = True
     ):
         """
@@ -58,6 +60,7 @@ class SessionCoordinator:
         self.audio_processor = audio_processor or AudioProcessor()
         self.video_manager = video_manager or VideoBufferManager(width, height)
         self.metrics_analyzer = metrics_analyzer or MetricsAnalyzer()
+        self.frame_analyzer = frame_analyzer or FrameAnalyzer()
         
         # Session state
         self.streaming_active = True
@@ -71,7 +74,7 @@ class SessionCoordinator:
         
         logger.info(
             f"SessionCoordinator initialized: {width}x{height}, "
-            f"incremental={enable_incremental}"
+            f"incremental={enable_incremental}, frame_analysis=enabled"
         )
     
     def add_frame(self, frame_data: bytes) -> bool:
@@ -173,7 +176,7 @@ class SessionCoordinator:
     
     def _process_new_frames(self) -> Optional[FrameAnalysisResult]:
         """
-        Process new frames (lightweight check).
+        Process new frames with real gesture and expression analysis.
         
         Returns:
             FrameAnalysisResult or None
@@ -185,23 +188,48 @@ class SessionCoordinator:
             return None
         
         frames_count = len(new_frames)
-        logger.debug(f"Processing {frames_count} new frames")
+        logger.debug(f"Processing {frames_count} new frames with FrameAnalyzer")
         
-        # Simple validation - count valid frames
-        valid_frames = sum(
-            1 for frame in new_frames
+        # Filter valid frames
+        valid_frames = [
+            frame for frame in new_frames
             if frame is not None and frame.size > 0
-        )
+        ]
         
-        self.last_processed_frame_index = len(all_frames)
+        if not valid_frames:
+            self.last_processed_frame_index = len(all_frames)
+            return None
         
-        return FrameAnalysisResult(
-            frames_analyzed=frames_count,
-            frames_with_face=valid_frames,
-            expressions=[],
-            gestures=[],
-            posture=[]
-        )
+        # Analyze frames for gestures and expressions
+        try:
+            fps = self.video_manager.fps or 30.0
+            result = self.frame_analyzer.analyze_frames(
+                valid_frames,
+                start_frame_index=self.last_processed_frame_index,
+                fps=fps
+            )
+            
+            self.last_processed_frame_index = len(all_frames)
+            
+            logger.debug(
+                f"Frame analysis: {result.frames_with_face} faces, "
+                f"{len(result.expressions)} expressions, {len(result.gestures)} gestures"
+            )
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Frame analysis failed: {e}", exc_info=True)
+            self.last_processed_frame_index = len(all_frames)
+            
+            # Return basic result on error
+            return FrameAnalysisResult(
+                frames_analyzed=frames_count,
+                frames_with_face=len(valid_frames),
+                expressions=[],
+                gestures=[],
+                posture=[]
+            )
     
     def end_stream(self) -> Optional[Path]:
         """
@@ -252,6 +280,7 @@ class SessionCoordinator:
         self.audio_processor.reset()
         self.video_manager.reset()
         self.metrics_analyzer.reset()
+        self.frame_analyzer.reset()
         
         self.streaming_active = True
         self.analysis_in_progress = False
@@ -269,6 +298,7 @@ class SessionCoordinator:
         self.audio_processor.close()
         self.video_manager.close()
         self.metrics_analyzer.close()
+        self.frame_analyzer.close()
         
         self.partial_results.clear()
         
@@ -337,6 +367,7 @@ class SessionFactory:
         )
         
         metrics_analyzer = MetricsAnalyzer()
+        frame_analyzer = FrameAnalyzer()
         
         return SessionCoordinator(
             width=width,
@@ -344,6 +375,7 @@ class SessionFactory:
             audio_processor=audio_processor,
             video_manager=video_manager,
             metrics_analyzer=metrics_analyzer,
+            frame_analyzer=frame_analyzer,
             enable_incremental=True
         )
     
@@ -377,6 +409,7 @@ class SessionFactory:
         )
         
         metrics_analyzer = MetricsAnalyzer()
+        frame_analyzer = FrameAnalyzer()
         
         return SessionCoordinator(
             width=width,
@@ -384,5 +417,6 @@ class SessionFactory:
             audio_processor=audio_processor,
             video_manager=video_manager,
             metrics_analyzer=metrics_analyzer,
+            frame_analyzer=frame_analyzer,
             enable_incremental=config.enable_incremental_processing
         )
