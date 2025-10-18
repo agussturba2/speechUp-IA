@@ -192,6 +192,9 @@ def compute_scores(analysis: Dict[str, Any]) -> Dict[str, int]:
       - pace
       - engagement
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
     # Verbal
     wpm                 = _get(analysis, "verbal.wpm", 0.0)
     fillers_per_min     = _get(analysis, "verbal.fillers_per_min", 0.0)
@@ -203,6 +206,13 @@ def compute_scores(analysis: Dict[str, Any]) -> Dict[str, int]:
     pitch_range_st      = _get(analysis, "prosody.pitch_range_semitones", 0.0)
     energy_cv           = _get(analysis, "prosody.energy_cv", 0.0)
     rhythm_consistency  = _get(analysis, "prosody.rhythm_consistency", 0.0)
+    
+    # Log input metrics for debugging
+    logger.info(
+        f"Scoring inputs: wpm={wpm:.1f}, fillers={fillers_per_min:.2f}, "
+        f"avg_pause={avg_pause_sec:.3f}, pitch_range={pitch_range_st:.2f}, "
+        f"rhythm={rhythm_consistency:.3f}"
+    )
 
     # Nonverbal
     gaze_screen_pct     = _get(analysis, "nonverbal.gaze_screen_pct", 0.0)     # 0..1
@@ -296,4 +306,11 @@ def compute_scores(analysis: Dict[str, Any]) -> Dict[str, int]:
         "pace":                 int(round(_clamp(pace))),
         "engagement":           int(round(_clamp(engagement))),
     }
+    
+    # Log output scores for debugging
+    logger.info(
+        f"Scores: fluency={out['fluency']}, clarity={out['clarity']}, "
+        f"pace={out['pace']}, engagement={out['engagement']}"
+    )
+    
     return out
