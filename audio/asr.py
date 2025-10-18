@@ -210,6 +210,15 @@ def transcribe_wav(wav_path: str, lang: Optional[str] = None) -> Dict[str, Any]:
         if DEBUG_ASR:
             logger.info(f"ASR enabled: model={used_model}, device={used_device}, duration={duration_sec:.2f}s, used_window={used_window:.2f}s")
         
+        # Check audio before transcribing
+        try:
+            import scipy.io.wavfile as wav_io
+            import numpy as np
+            sr, audio_data = wav_io.read(wav_for_asr)
+            logger.error(f"[ASR INPUT] WAV: sr={sr}Hz, shape={audio_data.shape}, dtype={audio_data.dtype}, min={audio_data.min()}, max={audio_data.max()}, mean={audio_data.mean():.2f}, std={audio_data.std():.2f}")
+        except Exception as check_err:
+            logger.error(f"[ASR INPUT] Failed to check audio: {check_err}")
+        
         # Load or get cached model
         start = time.time()
         model = _get_or_load_model(used_model, used_device, cache_dir)
@@ -234,6 +243,12 @@ def transcribe_wav(wav_path: str, lang: Optional[str] = None) -> Dict[str, Any]:
         raw_text = (result.get("text") or "").strip()
         text_len = len(raw_text)
         transcript_short = raw_text[:200].strip() if raw_text else ""
+        
+        # Log what Whisper returned
+        segments_list = result.get('segments', [])
+        no_speech_probs = [s.get('no_speech_prob', 0) for s in segments_list if 'no_speech_prob' in s]
+        avg_no_speech = sum(no_speech_probs) / len(no_speech_probs) if no_speech_probs else 0
+        logger.error(f"[ASR OUTPUT] text_len={text_len}, first_50_chars='{raw_text[:50]}', segments={len(segments_list)}, avg_no_speech_prob={avg_no_speech:.3f}")
         
         # Get duration from result or fallback
         result_duration = result.get("duration", used_window)
