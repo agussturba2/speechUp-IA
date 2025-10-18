@@ -642,6 +642,11 @@ def compute_prosody_metrics(y: np.ndarray, sr: int, segments: List[Tuple[float, 
         # Compute pitch metrics on voiced frames only
         f0_voiced = f0_hz[voiced_mask]
         pitch_mean_hz = float(np.nanmean(f0_voiced)) if len(f0_voiced) > 0 else 0.0
+        
+        _plog(f"Voiced frames: {len(f0_voiced)}, unique F0 values: {len(np.unique(f0_voiced[~np.isnan(f0_voiced)]))}")
+        if len(f0_voiced) > 0:
+            _plog(f"F0 range: min={np.nanmin(f0_voiced):.2f}Hz, max={np.nanmax(f0_voiced):.2f}Hz, std={np.nanstd(f0_voiced):.2f}Hz")
+        
         pitch_range_semitones = compute_semitone_range_robust(f0_hz, voiced_mask)
         pitch_cv = compute_pitch_cv_robust(f0_hz, voiced_mask)
         

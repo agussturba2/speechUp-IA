@@ -591,6 +591,12 @@ def _process_audio_analysis(
             "long_pauses": pause_metrics.get("long_pauses", []),
         })
         
+        logger.info(
+            "Pause metrics: avg=%.3fs, rate=%.2f/min",
+            result["verbal"]["avg_pause_sec"],
+            result["verbal"]["pause_rate_per_min"]
+        )
+        
         # Prosody
         if config.use_prosody:
             try:
