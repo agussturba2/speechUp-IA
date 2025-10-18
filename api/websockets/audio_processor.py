@@ -198,9 +198,18 @@ class AudioProcessor:
             dc_offset = audio_np.mean()
             logger.error(f"[EXPORT WAV] DC offset before correction: {dc_offset:.2f}")
             
-            if abs(dc_offset) > 1000:  # Significant DC offset
+            if abs(dc_offset) > 100:  # Any significant DC offset
                 logger.error(f"[EXPORT WAV] Removing DC offset: {dc_offset:.0f}")
-                audio_np = audio_np - int(dc_offset)
+                audio_np = audio_np.astype(np.float32) - dc_offset
+                
+                # Normalize to prevent clipping after offset removal
+                max_abs = max(abs(audio_np.min()), abs(audio_np.max()))
+                if max_abs > 32767:
+                    scale_factor = 32767 / max_abs
+                    logger.error(f"[EXPORT WAV] Scaling by {scale_factor:.4f} to prevent clipping")
+                    audio_np = audio_np * scale_factor
+                
+                audio_np = audio_np.astype(np.int16)
                 logger.error(f"[EXPORT WAV] After correction: mean={audio_np.mean():.2f}, min={audio_np.min()}, max={audio_np.max()}")
 
             wav.write(path, self.sample_rate, audio_np)
