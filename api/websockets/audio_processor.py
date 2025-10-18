@@ -265,13 +265,25 @@ class AudioProcessor:
             dc_offset_int16 = audio_int16.mean()
             logger.error(f"[AUDIO PRE-PROCESS] DC offset (int16): {dc_offset_int16:.2f}")
             
-            if abs(dc_offset_int16) > 1000:  # Threshold for int16 audio
-                logger.error(f"[DC OFFSET CORRECTION] Removing DC offset: {dc_offset_int16:.0f}")
-                audio_int16 = audio_int16 - int(dc_offset_int16)
-                logger.error(f"[DC OFFSET CORRECTION] After correction: mean={audio_int16.mean():.2f}, min={audio_int16.min()}, max={audio_int16.max()}")
+            # Store original int16 for WAV export later
+            audio_int16_corrected = audio_int16.copy()
             
-            # Now normalize to float32
-            audio_np = audio_int16.astype(np.float32) / self.normalization_factor
+            if abs(dc_offset_int16) > 100:  # Lower threshold for better correction
+                logger.error(f"[DC OFFSET CORRECTION] Removing DC offset: {dc_offset_int16:.0f}")
+                audio_int16_corrected = audio_int16_corrected.astype(np.float32) - dc_offset_int16
+                
+                # Normalize to prevent clipping after offset removal
+                max_abs = max(abs(audio_int16_corrected.min()), abs(audio_int16_corrected.max()))
+                if max_abs > 32767:
+                    scale_factor = 32767 / max_abs
+                    logger.error(f"[DC OFFSET CORRECTION] Scaling by {scale_factor:.4f} to prevent clipping")
+                    audio_int16_corrected = audio_int16_corrected * scale_factor
+                
+                audio_int16_corrected = audio_int16_corrected.astype(np.int16)
+                logger.error(f"[DC OFFSET CORRECTION] After correction: mean={audio_int16_corrected.mean():.2f}, min={audio_int16_corrected.min()}, max={audio_int16_corrected.max()}")
+            
+            # Now normalize to float32 for analysis
+            audio_np = audio_int16_corrected.astype(np.float32) / self.normalization_factor
             
             audio_duration = len(audio_np) / float(self.sample_rate)
             logger.info(f"Processing {audio_duration:.2f}s of audio")
@@ -354,10 +366,9 @@ class AudioProcessor:
             temp_wav_fd, temp_wav_path = tempfile.mkstemp(suffix=".wav")
             os.close(temp_wav_fd)
             
-            # Write WAV
-            audio_int16 = (audio_np * self.normalization_factor).astype(np.int16)
-            logger.error(f"[AUDIO BEFORE WAV WRITE] shape={audio_int16.shape}, dtype={audio_int16.dtype}, min={audio_int16.min()}, max={audio_int16.max()}, mean={audio_int16.mean():.2f}, std={audio_int16.std():.2f}")
-            wav.write(temp_wav_path, self.sample_rate, audio_int16)
+            # Write WAV using DC-offset corrected audio
+            logger.error(f"[AUDIO BEFORE WAV WRITE] shape={audio_int16_corrected.shape}, dtype={audio_int16_corrected.dtype}, min={audio_int16_corrected.min()}, max={audio_int16_corrected.max()}, mean={audio_int16_corrected.mean():.2f}, std={audio_int16_corrected.std():.2f}")
+            wav.write(temp_wav_path, self.sample_rate, audio_int16_corrected)
             
             # Transcribe using Whisper (async)
             logger.info("Transcribing audio with Whisper (async)")
