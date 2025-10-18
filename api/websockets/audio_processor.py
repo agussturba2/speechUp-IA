@@ -85,6 +85,12 @@ class AudioProcessor:
         """
         if not audio_data:
             return
+        
+        # Log first audio chunk to diagnose format issues
+        if len(self.audio_buffer) == 0 and len(audio_data) >= 100:
+            import numpy as np
+            sample_data = np.frombuffer(audio_data[:100], dtype=np.int16)
+            logger.error(f"[AUDIO RECEIVED FROM CLIENT] first_chunk_size={len(audio_data)} bytes, first_50_samples: min={sample_data.min()}, max={sample_data.max()}, mean={sample_data.mean():.2f}, std={sample_data.std():.2f}")
 
         # Prepend any pending partial sample
         if self._partial_sample:
@@ -317,6 +323,7 @@ class AudioProcessor:
             
             # Write WAV
             audio_int16 = (audio_np * self.normalization_factor).astype(np.int16)
+            logger.error(f"[AUDIO BEFORE WAV WRITE] shape={audio_int16.shape}, dtype={audio_int16.dtype}, min={audio_int16.min()}, max={audio_int16.max()}, mean={audio_int16.mean():.2f}, std={audio_int16.std():.2f}")
             wav.write(temp_wav_path, self.sample_rate, audio_int16)
             
             # Transcribe using Whisper (async)
