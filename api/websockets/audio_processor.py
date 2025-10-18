@@ -237,17 +237,23 @@ class AudioProcessor:
                 logger.debug("Audio segment empty after alignment trimming")
                 return None
             
-            # Convert to numpy array
-            audio_np = np.frombuffer(
+            # Convert to numpy array (int16 first)
+            audio_int16 = np.frombuffer(
                 audio_segment,
                 dtype=np.int16
-            ).astype(np.float32) / self.normalization_factor
+            )
             
-            # Remove DC offset if present (center around 0)
-            dc_offset = audio_np.mean()
-            if abs(dc_offset) > 0.01:  # Threshold for normalized audio
-                logger.error(f"[DC OFFSET CORRECTION] Removing DC offset: {dc_offset:.4f}")
-                audio_np = audio_np - dc_offset
+            # Remove DC offset BEFORE normalization to prevent clipping
+            dc_offset_int16 = audio_int16.mean()
+            logger.error(f"[AUDIO PRE-PROCESS] DC offset (int16): {dc_offset_int16:.2f}")
+            
+            if abs(dc_offset_int16) > 1000:  # Threshold for int16 audio
+                logger.error(f"[DC OFFSET CORRECTION] Removing DC offset: {dc_offset_int16:.0f}")
+                audio_int16 = audio_int16 - int(dc_offset_int16)
+                logger.error(f"[DC OFFSET CORRECTION] After correction: mean={audio_int16.mean():.2f}, min={audio_int16.min()}, max={audio_int16.max()}")
+            
+            # Now normalize to float32
+            audio_np = audio_int16.astype(np.float32) / self.normalization_factor
             
             audio_duration = len(audio_np) / float(self.sample_rate)
             logger.info(f"Processing {audio_duration:.2f}s of audio")
