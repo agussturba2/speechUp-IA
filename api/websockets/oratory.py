@@ -171,12 +171,21 @@ def process_pipeline_results(proc: Dict[str, Any], analysis_time: float) -> Dict
 async def send_analysis_result(user_id: str, result: Dict[str, Any]):
     url = "http://98.91.55.213:7070/session"
     params = {"userId": user_id}
+    
+    logger.error(f"=== ATTEMPTING DATABASE INSERT ===")
+    logger.error(f"User ID: {user_id}")
+    logger.error(f"URL: {url}")
+    logger.error(f"Body keys: {list(result.keys())}")
+    logger.error(f"Body size: {len(str(result))} chars")
+    
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(url, params=params, json=result, timeout=30.0)
             response.raise_for_status()
+            logger.error(f"✅ DATABASE INSERT SUCCESSFUL - Status: {response.status_code}")
             logger.info(f"Analysis result sent to {url} successfully")
     except Exception as e:
+        logger.error(f"❌ DATABASE INSERT FAILED - Error: {e}")
         logger.error(f"Failed to send analysis result to {url}: {e}")
 
 class OratorySession:
