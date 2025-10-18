@@ -64,7 +64,7 @@ class IncrementalOratorySession:
         self.buffer_size = buffer_size
         self.processing_interval = processing_interval
         
-        logger.info(f"IncrementalOratorySession initialized (using SessionCoordinator)")
+        logger.error(f"IncrementalOratorySession initialized (using SessionCoordinator)")
     
     # Delegate to SessionCoordinator
     def add_frame(self, frame_data: bytes) -> bool:

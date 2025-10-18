@@ -63,7 +63,7 @@ class FrameAnalyzer:
         self._frame_index = 0
         self._expression_history = []
         
-        logger.info(
+        logger.error(
             f"FrameAnalyzer initialized: face={self.config.enable_face_detection}, "
             f"gestures={self.config.enable_gesture_detection}"
         )
@@ -80,7 +80,7 @@ class FrameAnalyzer:
                     min_detection_confidence=self.config.min_detection_confidence,
                     min_tracking_confidence=self.config.min_tracking_confidence
                 )
-                logger.info("MediaPipe FaceMesh initialized successfully")
+                logger.error("MediaPipe FaceMesh initialized successfully")
             
             if self.config.enable_gesture_detection and self._hands is None:
                 self._hands = mp.solutions.hands.Hands(
@@ -89,7 +89,7 @@ class FrameAnalyzer:
                     min_detection_confidence=self.config.min_detection_confidence,
                     min_tracking_confidence=self.config.min_tracking_confidence
                 )
-                logger.info("MediaPipe Hands initialized successfully")
+                logger.error("MediaPipe Hands initialized successfully")
                 
         except ImportError as e:
             logger.warning(f"MediaPipe not available: {e}")
@@ -124,9 +124,9 @@ class FrameAnalyzer:
         
         # Lazy init MediaPipe
         if self._face_mesh is None and self._hands is None:
-            logger.info("Initializing MediaPipe components for first time...")
+            logger.error("Initializing MediaPipe components for first time...")
             self._init_mediapipe_components()
-            logger.info(f"MediaPipe initialized: face_mesh={self._face_mesh is not None}, hands={self._hands is not None}")
+            logger.error(f"MediaPipe initialized: face_mesh={self._face_mesh is not None}, hands={self._hands is not None}")
         
         expressions: List[Expression] = []
         gestures: List[Gesture] = []
@@ -155,7 +155,7 @@ class FrameAnalyzer:
             
             self._frame_index = frame_index
         
-        logger.info(
+        logger.error(
             f"Analyzed {len(frames)} frames: {frames_with_face} with face, "
             f"{len(expressions)} expressions, {len(gestures)} gestures"
         )
