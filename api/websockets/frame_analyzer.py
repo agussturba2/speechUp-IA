@@ -134,7 +134,13 @@ class FrameAnalyzer:
         
         for i, frame in enumerate(frames):
             if frame is None or frame.size == 0:
+                if i == 0:  # Log only first occurrence
+                    logger.error(f"Invalid frame at index {i}: None or empty")
                 continue
+            
+            # Log first frame details
+            if i == 0:
+                logger.error(f"First frame: shape={frame.shape}, dtype={frame.dtype}, mean={frame.mean():.2f}")
             
             frame_index = start_frame_index + i
             timestamp = frame_index / fps
@@ -147,6 +153,8 @@ class FrameAnalyzer:
                 if face_detected:
                     frames_with_face += 1
                     expressions.extend(frame_expressions)
+                elif i == 0:  # Log why first frame had no face
+                    logger.error(f"No face detected in first frame")
             
             # Detect hand gestures
             if self.config.enable_gesture_detection and self._hands is not None:
@@ -195,6 +203,8 @@ class FrameAnalyzer:
             results = self._face_mesh.process(rgb_frame)
             
             if not results.multi_face_landmarks:
+                if frame_index == 0:  # Log for first frame
+                    logger.error(f"MediaPipe returned no face landmarks for frame 0")
                 return False, expressions
             
             # Analyze facial landmarks for expressions
