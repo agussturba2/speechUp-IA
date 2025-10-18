@@ -14,6 +14,13 @@ from typing import Dict, List, Tuple, Optional
 
 os.environ.setdefault("SPEECHUP_USE_PROSODY", "1")
 os.environ.setdefault("SPEECHUP_DEBUG_PROSODY", "1")
+os.environ.setdefault("SPEECHUP_PROSODY_PREFILTER", "1")
+os.environ.setdefault("SPEECHUP_PROSODY_HPF_HZ", "80")
+os.environ.setdefault("SPEECHUP_F0_MIN", "70")
+os.environ.setdefault("SPEECHUP_F0_MAX", "350")
+os.environ.setdefault("SPEECHUP_F0_PROFILE", "")
+os.environ.setdefault("SPEECHUP_VOICED_PROB_THRESHOLD", "0.40")
+os.environ.setdefault("SPEECHUP_PITCH_MEDIAN_WINDOW", "3")
 
 DEBUG_PROS = os.getenv("SPEECHUP_DEBUG_PROSODY", "0") == "1"
 def _plog(msg: str):
