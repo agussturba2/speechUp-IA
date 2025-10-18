@@ -14,7 +14,7 @@ from typing import Dict, List, Tuple, Optional
 
 os.environ.setdefault("SPEECHUP_USE_PROSODY", "1")
 os.environ.setdefault("SPEECHUP_DEBUG_PROSODY", "1")
-os.environ.setdefault("SPEECHUP_PROSODY_PREFILTER", "1")
+os.environ.setdefault("SPEECHUP_PROSODY_PREFILTER", "0")
 os.environ.setdefault("SPEECHUP_PROSODY_HPF_HZ", "80")
 os.environ.setdefault("SPEECHUP_F0_MIN", "70")
 os.environ.setdefault("SPEECHUP_F0_MAX", "350")
@@ -205,7 +205,13 @@ def compute_pitch_hz_robust(y: np.ndarray, sr: int = SR) -> Tuple[np.ndarray, np
         voiced_mask = (~np.isnan(f0_hz)) & (voiced_prob >= VOICED_PROB_THRESHOLD)
         voiced_count_pyin = np.sum(voiced_mask)
         
-        logger.debug(f"PYIN: {voiced_count_pyin} voiced frames with threshold 0.60")
+        # Debug: check raw pyin output
+        if voiced_count_pyin > 0:
+            raw_voiced_f0 = f0_hz[voiced_mask]
+            _plog(f"Raw PYIN: {voiced_count_pyin} frames, unique={len(np.unique(raw_voiced_f0))}, "
+                  f"min={np.nanmin(raw_voiced_f0):.2f}Hz, max={np.nanmax(raw_voiced_f0):.2f}Hz, std={np.nanstd(raw_voiced_f0):.2f}Hz")
+        
+        logger.debug(f"PYIN: {voiced_count_pyin} voiced frames with threshold {VOICED_PROB_THRESHOLD}")
         
         # Fallback method: librosa.yin ONLY if no voiced frames with pyin
         if voiced_count_pyin == 0:
@@ -596,8 +602,13 @@ def compute_prosody_metrics(y: np.ndarray, sr: int, segments: List[Tuple[float, 
         }
     
     try:
-        # Apply audio pre-filtering (or skip if disabled)
-        y_filtered = apply_audio_prefiltering(y)
+        # Apply audio pre-filtering only if enabled (default: disabled for pitch)
+        if PROSODY_PREFILTER:
+            _plog("Applying prefilter for prosody analysis")
+            y_filtered = apply_audio_prefiltering(y)
+        else:
+            _plog("Skipping prefilter to preserve pitch variation")
+            y_filtered = y
         
         # Compute robust pitch and energy with consistent framing
         f0_hz, voiced_mask, method_name = compute_pitch_hz_robust(y_filtered)
