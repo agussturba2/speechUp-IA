@@ -388,13 +388,13 @@ async def handle_incremental_oratory_feedback(
         height: Height of video frames (uses config default if None)
         incremental_interval: Process incrementally every N frames (uses config default if None)
     """
-    logger.info("WebSocket handler called for incremental feedback")
+    logger.error("=== INCREMENTAL HANDLER CALLED ===")
     await websocket.accept()
-    logger.info("WebSocket connection accepted")
+    logger.error("WebSocket accepted")
 
     # Get user_id from query parameters
     user_id = websocket.query_params.get("user_id")
-    logger.info(f"WebSocket user_id: {user_id}")
+    logger.error(f"User ID: {user_id}")
     if user_id is None:
         await websocket.close(code=1008, reason="user_id is required in query params")
         return
@@ -404,21 +404,19 @@ async def handle_incremental_oratory_feedback(
     width = width or incremental_config.default_width
     height = height or incremental_config.default_height
     incremental_interval = incremental_interval or incremental_config.processing_interval
-    
-    logger.info(f"Creating session: buffer={buffer_size}, size={width}x{height}, interval={incremental_interval}")
 
     # Initialize session
     session = None
 
     try:
-        logger.info("Initializing IncrementalOratorySession...")
+        logger.error(f"Creating session: {width}x{height}, buffer={buffer_size}, interval={incremental_interval}")
         session = IncrementalOratorySession(
             buffer_size=buffer_size,
             width=width,
             height=height,
             processing_interval=incremental_interval
         )
-        logger.info("Session created successfully")
+        logger.error("Session created OK")
         
         # Send initial connection message
         await websocket.send_json({
