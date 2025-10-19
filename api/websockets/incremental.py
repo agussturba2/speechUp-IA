@@ -523,7 +523,7 @@ async def handle_incremental_oratory_feedback(
                                     timeline = TimelineGenerator().build_timeline(result)
                                     events = timeline.get("events", [])
                                     if events:
-                                        video_path = self._coordinator.video_manager.get_video_path()
+                                        video_path = session._coordinator.video_manager.get_video_path()
                                         duration_sec = result.get("media", {}).get("duration_sec")
                                         await scheduler.enqueue_session(
                                             result.get("id", user_id),
@@ -604,7 +604,7 @@ async def handle_incremental_oratory_feedback(
                                 timeline = TimelineGenerator().build_timeline(result)
                                 events = timeline.get("events", [])
                                 if events:
-                                    video_path = self._coordinator.video_manager.get_video_path()
+                                    video_path = session._coordinator.video_manager.get_video_path()
                                     duration_sec = result.get("media", {}).get("duration_sec")
                                     await scheduler.enqueue_session(
                                         result.get("id", user_id),
@@ -669,7 +669,7 @@ async def handle_incremental_oratory_feedback(
                         timeline = TimelineGenerator().build_timeline(result)
                         events = timeline.get("events", [])
                         if events:
-                            video_path = self._coordinator.video_manager.get_video_path()
+                            video_path = session._coordinator.video_manager.get_video_path()
                             duration_sec = result.get("media", {}).get("duration_sec")
                             await scheduler.enqueue_session(
                                 result.get("id", user_id),
