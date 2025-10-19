@@ -430,6 +430,8 @@ async def handle_incremental_oratory_feedback(
         # Track frames received for incremental processing
         frames_since_last_process = 0
         last_activity_time = time.time()
+        last_incremental_time = 0.0
+        min_incremental_interval = 2.0  # Min 2 seconds between incremental processing
         inactivity_timeout = incremental_config.inactivity_timeout_sec
         
         while True:
@@ -450,47 +452,38 @@ async def handle_incremental_oratory_feedback(
                         session.add_audio(data[3:])
                         continue
                     
-                    # Process video frame
+                    # Process video frame (always save for final analysis)
                     if session.add_frame(data):
                         frames_since_last_process += 1
                         
-                        # Perform incremental processing at regular intervals
+                        # Perform incremental processing at regular intervals with rate limiting
                         if frames_since_last_process >= incremental_interval:
-                            # Send progress update
-                            await websocket.send_json({
-                                "status": "processing",
-                                "message": f"Procesando incrementalmente ({session.frame_count} frames)",
-                                "frames_processed": session.frame_count,
-                                "timestamp": time.time()
-                            })
+                            current_time = time.time()
                             
-                            # Run incremental processing
-                            result = await session.process_incremental()
-                            
-                            # Send detailed incremental update with metrics
-                            if "incremental_metrics" in result:
-                                await websocket.send_json({
-                                    "status": "incremental_update",
-                                    "frames_processed": session.frame_count,
-                                    "metrics": result["incremental_metrics"],
-                                    "confidence": result.get("confidence", 0.5),
-                                    "timestamp": time.time()
-                                })
+                            # Rate limit: process only if enough time has passed
+                            if current_time - last_incremental_time >= min_incremental_interval:
+                                # Run incremental processing
+                                result = await session.process_incremental()
+                                last_incremental_time = current_time
                                 
-                                # Check if we have any recent fillers to report
-                                if "recent_fillers" in result and result["recent_fillers"]:
-                                    await websocket.send_json({
-                                        "status": "filler_detected",
-                                        "fillers": result["recent_fillers"],
-                                        "timestamp": time.time()
-                                    })
-                            else:
-                                # Send simplified update (backward compatibility)
-                                await websocket.send_json({
+                                # Build consolidated message (batching)
+                                update_msg = {
                                     "status": "incremental_update",
                                     "frames_processed": session.frame_count,
-                                    "timestamp": time.time()
-                                })
+                                    "timestamp": current_time
+                                }
+                                
+                                # Add metrics if available
+                                if "incremental_metrics" in result:
+                                    update_msg["metrics"] = result["incremental_metrics"]
+                                    update_msg["confidence"] = result.get("confidence", 0.5)
+                                    
+                                    # Include fillers in same message
+                                    if "recent_fillers" in result and result["recent_fillers"]:
+                                        update_msg["recent_fillers"] = result["recent_fillers"]
+                                
+                                # Send single consolidated message
+                                await websocket.send_json(update_msg)
                             
                             frames_since_last_process = 0
                             

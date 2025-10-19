@@ -71,8 +71,10 @@ class SessionCoordinator:
         # Tracking for incremental processing
         self.last_processed_frame_index = 0
         self.partial_results = []
+        self.last_audio_process_time = 0.0
+        self.audio_process_interval = 5.0  # Process audio every 5 seconds
         
-        logger.error(
+        logger.debug(
             f"SessionCoordinator initialized: {width}x{height}, "
             f"incremental={enable_incremental}, frame_analysis=enabled"
         )
@@ -105,10 +107,10 @@ class SessionCoordinator:
         Returns:
             IncrementalUpdate with current metrics and status
         """
-        logger.error(f"process_incremental called: frame_count={self.video_manager.frame_count}")
+        logger.debug(f"process_incremental called: frame_count={self.video_manager.frame_count}")
         
         if self.analysis_in_progress:
-            logger.error("Analysis already in progress, skipping")
+            logger.debug("Analysis already in progress, skipping")
             return IncrementalUpdate(
                 status=AnalysisStatus.ANALYZING,
                 frames_processed=self.video_manager.frame_count,
@@ -121,7 +123,7 @@ class SessionCoordinator:
         
         try:
             if not self.enable_incremental:
-                logger.error("Incremental processing disabled, returning status only")
+                logger.debug("Incremental processing disabled, returning status only")
                 # Simple status update without processing
                 result = IncrementalUpdate(
                     status=AnalysisStatus.PROCESSING,
@@ -133,26 +135,32 @@ class SessionCoordinator:
                 self.partial_results.append(result)
                 return result
             
-            # Process audio
-            logger.error("Processing audio...")
-            audio_result = await self.audio_processor.process_audio()
-            if audio_result:
-                logger.error(f"Audio result: {len(audio_result.words)} words, {len(audio_result.fillers)} fillers, {audio_result.duration_sec:.2f}s, speech={audio_result.speech_detected}")
-                self.metrics_analyzer.update_from_audio(audio_result)
+            # Process audio with debouncing (CPU-intensive: Whisper)
+            audio_result = None
+            current_time = time.time()
+            if current_time - self.last_audio_process_time >= self.audio_process_interval:
+                logger.debug("Processing audio...")
+                audio_result = await self.audio_processor.process_audio()
+                self.last_audio_process_time = current_time
+                if audio_result:
+                    logger.debug(f"Audio result: {len(audio_result.words)} words, {len(audio_result.fillers)} fillers, {audio_result.duration_sec:.2f}s, speech={audio_result.speech_detected}")
+                    self.metrics_analyzer.update_from_audio(audio_result)
+            else:
+                logger.debug(f"Skipping audio processing (debouncing: {current_time - self.last_audio_process_time:.1f}s < {self.audio_process_interval}s)")
             
             # Process frames (lightweight check for now)
-            logger.error(f"Calling _process_new_frames(), last_processed={self.last_processed_frame_index}")
+            logger.debug(f"Calling _process_new_frames(), last_processed={self.last_processed_frame_index}")
             frame_result = self._process_new_frames()
             if frame_result:
-                logger.error(f"Frame result: {frame_result.frames_analyzed} frames analyzed")
+                logger.debug(f"Frame result: {frame_result.frames_analyzed} frames analyzed")
                 self.metrics_analyzer.update_from_frames(frame_result)
             else:
-                logger.error("No frame result returned")
+                logger.debug("No frame result returned")
             
             # Get computed metrics
             metrics = self.metrics_analyzer.get_metrics()
             confidence = self.metrics_analyzer.get_confidence()
-            logger.error(f"Computed metrics: wpm={metrics.wpm:.1f}, fillers={metrics.fillers_per_min:.2f}, gestures={metrics.gesture_rate:.1f}, expressions={metrics.expression_variability:.2f}")
+            logger.debug(f"Computed metrics: wpm={metrics.wpm:.1f}, fillers={metrics.fillers_per_min:.2f}, gestures={metrics.gesture_rate:.1f}, expressions={metrics.expression_variability:.2f}")
             
             # Build incremental update
             result = IncrementalUpdate(
@@ -188,6 +196,7 @@ class SessionCoordinator:
     def _process_new_frames(self) -> Optional[FrameAnalysisResult]:
         """
         Process new frames with real gesture and expression analysis.
+        Sample every 3rd frame to reduce CPU load (MediaPipe is expensive).
         
         Returns:
             FrameAnalysisResult or None
@@ -198,12 +207,15 @@ class SessionCoordinator:
         if not new_frames:
             return None
         
-        frames_count = len(new_frames)
-        logger.error(f"Processing {frames_count} new frames with FrameAnalyzer")
+        # Sample every 3rd frame for incremental processing (reduces CPU by ~66%)
+        # Final analysis uses ALL frames, so this doesn't affect quality
+        sampled_frames = new_frames[::3]
         
-        # Filter valid frames
+        logger.debug(f"Analyzing {len(sampled_frames)} sampled frames (out of {len(new_frames)} new, last={self.last_processed_frame_index})")
+        
+        # Filter valid frames from sampled frames
         valid_frames = [
-            frame for frame in new_frames
+            frame for frame in sampled_frames
             if frame is not None and frame.size > 0
         ]
         
@@ -214,15 +226,18 @@ class SessionCoordinator:
         # Analyze frames for gestures and expressions
         try:
             fps = self.video_manager.fps or 30.0
+            # Analyze sampled frames (reduces CPU load)
             result = self.frame_analyzer.analyze_frames(
-                valid_frames,
+                sampled_frames,
                 start_frame_index=self.last_processed_frame_index,
                 fps=fps
             )
             
+            # Update last processed index to ALL frames (not just sampled)
+            # This ensures final analysis uses all accumulated frames
             self.last_processed_frame_index = len(all_frames)
             
-            logger.error(
+            logger.debug(
                 f"Frame analysis: {result.frames_with_face} faces, "
                 f"{len(result.expressions)} expressions, {len(result.gestures)} gestures"
             )
@@ -235,7 +250,7 @@ class SessionCoordinator:
             
             # Return basic result on error
             return FrameAnalysisResult(
-                frames_analyzed=frames_count,
+                frames_analyzed=len(sampled_frames),
                 frames_with_face=len(valid_frames),
                 expressions=[],
                 gestures=[],
