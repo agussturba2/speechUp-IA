@@ -526,6 +526,12 @@ async def handle_incremental_oratory_feedback(
                                     logger.info(f"🎬 Building timeline for session {user_id}")
                                     timeline = TimelineGenerator().build_timeline(result)
                                     events = timeline.get("events", [])
+                                    if not events:
+                                        logger.warning(f"🎯 Timeline empty, attempting fallback from incremental metrics")
+                                        fallback_events = _build_fallback_events(session, result)
+                                        events = fallback_events
+                                        timeline["events"] = events
+                                        logger.info(f"🎯 Fallback produced {len(events)} events")
                                     logger.info(f"🎬 Timeline generated with {len(events)} events")
                                     if events:
                                         video_path = session._coordinator.video_manager.get_video_path()
@@ -616,6 +622,12 @@ async def handle_incremental_oratory_feedback(
                                 logger.info(f"🎬 [TIMEOUT] Building timeline for session {user_id}")
                                 timeline = TimelineGenerator().build_timeline(result)
                                 events = timeline.get("events", [])
+                                if not events:
+                                    logger.warning(f"🎯 [TIMEOUT] Timeline empty, attempting fallback from incremental metrics")
+                                    fallback_events = _build_fallback_events(session, result)
+                                    events = fallback_events
+                                    timeline["events"] = events
+                                    logger.info(f"🎯 [TIMEOUT] Fallback produced {len(events)} events")
                                 logger.info(f"🎬 [TIMEOUT] Timeline generated with {len(events)} events")
                                 if events:
                                     video_path = session._coordinator.video_manager.get_video_path()
