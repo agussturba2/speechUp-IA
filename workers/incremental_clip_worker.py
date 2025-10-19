@@ -149,8 +149,8 @@ class IncrementalClipWorker:
             process,
             str(clip_path),
             vcodec="libx264",
-            acodec="aac",
             preset="veryfast",
+            acodec="aac",
             movflags="faststart",
         )
         try:
