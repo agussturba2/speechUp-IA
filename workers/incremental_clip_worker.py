@@ -86,17 +86,42 @@ class IncrementalClipWorker:
 
         clip_path: Optional[Path] = None
         thumbnail_path: Optional[Path] = None
+        local_video_path: Optional[Path] = None
 
         try:
-            # Validate video file exists
-            logger.info(f"🔍 Validating video file: {clip_job.video_path}")
-            if not Path(clip_job.video_path).exists():
-                logger.error(f"❌ Video file not found: {clip_job.video_path}")
-                await redis_conn.delete(job_key)
-                return
-            
-            file_size = Path(clip_job.video_path).stat().st_size
-            logger.info(f"✅ Video file validated: {file_size} bytes")
+            # Download video from S3 if it's an S3 URL
+            if clip_job.video_path and clip_job.video_path.startswith("s3://"):
+                logger.info(f"📥 Downloading video from S3: {clip_job.video_path}")
+                s3_client = await get_s3_client()
+                
+                # Parse S3 URL: s3://bucket/key
+                s3_parts = clip_job.video_path.replace("s3://", "").split("/", 1)
+                bucket = s3_parts[0]
+                key = s3_parts[1] if len(s3_parts) > 1 else ""
+                
+                # Download to temp location
+                local_video_path = Path(tempfile.gettempdir()) / f"{clip_job.session_id}_source.avi"
+                await asyncio.to_thread(
+                    s3_client.download_file,
+                    bucket,
+                    key,
+                    str(local_video_path)
+                )
+                file_size = local_video_path.stat().st_size
+                logger.info(f"✅ Video downloaded from S3: {file_size} bytes")
+                
+                # Update job to use local path for processing
+                clip_job.video_path = str(local_video_path)
+            else:
+                # Validate local video file exists
+                logger.info(f"🔍 Validating video file: {clip_job.video_path}")
+                if not Path(clip_job.video_path).exists():
+                    logger.error(f"❌ Video file not found: {clip_job.video_path}")
+                    await redis_conn.delete(job_key)
+                    return
+                
+                file_size = Path(clip_job.video_path).stat().st_size
+                logger.info(f"✅ Video file validated: {file_size} bytes")
 
             # Generate clip and thumbnail in parallel
             logger.info(f"⚙️ Starting clip generation (parallel)...")
@@ -112,6 +137,27 @@ class IncrementalClipWorker:
             logger.info(f"📡 Notifying backend at {self.clips_api_url}...")
             await self._notify_backend(clip_job, clip_url, thumbnail_url)
             logger.info(f"✅ Backend notified successfully")
+            
+            # Delete source video from S3 if it was uploaded temporarily
+            if local_video_path:
+                try:
+                    s3_client = await get_s3_client()
+                    s3_parts = clip_job.video_path.replace("s3://", "").split("/", 1) if "s3://" in str(clip_job.video_path) else None
+                    if s3_parts and len(s3_parts) == 2:
+                        bucket, key = s3_parts[0], s3_parts[1]
+                        # Get original S3 path from job metadata
+                        original_s3_path = None
+                        job_data = await redis_conn.hgetall(job_key)
+                        if "video_path" in job_data:
+                            original_s3_path = job_data["video_path"]
+                        
+                        if original_s3_path and original_s3_path.startswith("s3://"):
+                            s3_parts = original_s3_path.replace("s3://", "").split("/", 1)
+                            bucket, key = s3_parts[0], s3_parts[1]
+                            await asyncio.to_thread(s3_client.delete_object, Bucket=bucket, Key=key)
+                            logger.info(f"🗑️ Deleted temp video from S3: {original_s3_path}")
+                except Exception as cleanup_err:
+                    logger.warning(f"⚠️ Failed to delete temp video from S3: {cleanup_err}")
             
             await redis_conn.delete(job_key)
             logger.info(f"✅ Clip job {job_id} completed successfully")
@@ -132,10 +178,14 @@ class IncrementalClipWorker:
                 await redis_conn.rpush(REDIS_CLIP_QUEUE, job_id)
                 logger.info(f"🔄 Job {job_id} re-enqueued")
         finally:
+            # Clean up local files
             if clip_path and clip_path.exists():
                 clip_path.unlink(missing_ok=True)
             if thumbnail_path and thumbnail_path.exists():
                 thumbnail_path.unlink(missing_ok=True)
+            if local_video_path and local_video_path.exists():
+                local_video_path.unlink(missing_ok=True)
+                logger.info(f"🧹 Cleaned up local video file: {local_video_path}")
 
     async def _generate_clip(self, job: ClipJob) -> Path:
         start = max(job.start_sec - job.margin_sec, 0.0)

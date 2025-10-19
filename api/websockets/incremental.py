@@ -536,11 +536,30 @@ async def handle_incremental_oratory_feedback(
                                     if events:
                                         video_path = session._coordinator.video_manager.get_video_path()
                                         duration_sec = result.get("media", {}).get("duration_sec")
-                                        logger.warning(f"🎬 Enqueuing clips: video_path={video_path}, duration={duration_sec}s, events={len(events)}")
+                                        
+                                        # Upload video to S3 before enqueuing clips
+                                        video_s3_url = None
+                                        if video_path and video_path.exists():
+                                            from api.services.s3_client import get_s3_client
+                                            import boto3
+                                            session_id = result.get("id", user_id)
+                                            s3_key = f"temp-videos/{session_id}/{video_path.name}"
+                                            s3_client = await get_s3_client()
+                                            bucket = os.getenv("CLIP_BUCKET", "clips-bucket-speech-up")
+                                            await asyncio.to_thread(
+                                                s3_client.upload_file,
+                                                str(video_path),
+                                                bucket,
+                                                s3_key
+                                            )
+                                            video_s3_url = f"s3://{bucket}/{s3_key}"
+                                            logger.warning(f"📤 Uploaded video to S3: {video_s3_url}")
+                                        
+                                        logger.warning(f"🎬 Enqueuing clips: video_path={video_s3_url}, duration={duration_sec}s, events={len(events)}")
                                         enqueued_count = await scheduler.enqueue_session(
                                             result.get("id", user_id),
                                             events,
-                                            video_path=str(video_path) if video_path else None,
+                                            video_path=video_s3_url,
                                             duration_sec=duration_sec
                                         )
                                         logger.warning(f"🎬 Successfully enqueued {enqueued_count} clip jobs to Redis")
@@ -632,11 +651,30 @@ async def handle_incremental_oratory_feedback(
                                 if events:
                                     video_path = session._coordinator.video_manager.get_video_path()
                                     duration_sec = result.get("media", {}).get("duration_sec")
-                                    logger.warning(f"🎬 [TIMEOUT] Enqueuing clips: video_path={video_path}, duration={duration_sec}s")
+                                    
+                                    # Upload video to S3 before enqueuing clips
+                                    video_s3_url = None
+                                    if video_path and video_path.exists():
+                                        from api.services.s3_client import get_s3_client
+                                        import boto3
+                                        session_id = result.get("id", user_id)
+                                        s3_key = f"temp-videos/{session_id}/{video_path.name}"
+                                        s3_client = await get_s3_client()
+                                        bucket = os.getenv("CLIP_BUCKET", "clips-bucket-speech-up")
+                                        await asyncio.to_thread(
+                                            s3_client.upload_file,
+                                            str(video_path),
+                                            bucket,
+                                            s3_key
+                                        )
+                                        video_s3_url = f"s3://{bucket}/{s3_key}"
+                                        logger.warning(f"📤 [TIMEOUT] Uploaded video to S3: {video_s3_url}")
+                                    
+                                    logger.warning(f"🎬 [TIMEOUT] Enqueuing clips: video_path={video_s3_url}, duration={duration_sec}s")
                                     enqueued_count = await scheduler.enqueue_session(
                                         result.get("id", user_id),
                                         events,
-                                        video_path=str(video_path) if video_path else None,
+                                        video_path=video_s3_url,
                                         duration_sec=duration_sec
                                     )
                                     logger.warning(f"🎬 [TIMEOUT] Successfully enqueued {enqueued_count} clip jobs")
@@ -706,11 +744,30 @@ async def handle_incremental_oratory_feedback(
                         if events:
                             video_path = session._coordinator.video_manager.get_video_path()
                             duration_sec = result.get("media", {}).get("duration_sec")
-                            logger.warning(f"🎬 [DISCONNECT] Enqueuing clips: video_path={video_path}, duration={duration_sec}s")
+                            
+                            # Upload video to S3 before enqueuing clips
+                            video_s3_url = None
+                            if video_path and video_path.exists():
+                                from api.services.s3_client import get_s3_client
+                                import boto3
+                                session_id = result.get("id", user_id)
+                                s3_key = f"temp-videos/{session_id}/{video_path.name}"
+                                s3_client = await get_s3_client()
+                                bucket = os.getenv("CLIP_BUCKET", "clips-bucket-speech-up")
+                                await asyncio.to_thread(
+                                    s3_client.upload_file,
+                                    str(video_path),
+                                    bucket,
+                                    s3_key
+                                )
+                                video_s3_url = f"s3://{bucket}/{s3_key}"
+                                logger.warning(f"📤 [DISCONNECT] Uploaded video to S3: {video_s3_url}")
+                            
+                            logger.warning(f"🎬 [DISCONNECT] Enqueuing clips: video_path={video_s3_url}, duration={duration_sec}s")
                             enqueued_count = await scheduler.enqueue_session(
                                 result.get("id", user_id),
                                 events,
-                                video_path=str(video_path) if video_path else None,
+                                video_path=video_s3_url,
                                 duration_sec=duration_sec
                             )
                             logger.warning(f"🎬 [DISCONNECT] Successfully enqueued {enqueued_count} clip jobs")
