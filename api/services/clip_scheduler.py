@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 REDIS_CLIP_QUEUE = "clip_jobs:pending"
 REDIS_CLIP_HASH_PREFIX = "clip_job:"
 
-TARGET_EVENTS = {"filler", "pause_long", "good_rhythm", "gaze_lost"}
+TARGET_EVENTS = {"filler", "pause_long", "good_rhythm", "gaze_lost", "summary"}
 DEFAULT_MARGIN_SEC = 0.5
 MAX_CLIPS_PER_SESSION = 10
 DEFAULT_REDIS_URL = "redis://localhost:6379/0"
