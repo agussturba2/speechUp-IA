@@ -22,6 +22,8 @@ from video.pipeline import run_analysis_pipeline
 from .session_coordinator import SessionCoordinator, SessionFactory
 from .models import AnalysisResult, AnalysisStatus
 from .oratory import process_pipeline_results, send_analysis_result
+from api.analysis.timeline_generator import TimelineGenerator
+from api.services.clip_scheduler import ClipScheduler
 from .config import config as incremental_config
 
 logger = logging.getLogger(__name__)
@@ -523,6 +525,21 @@ async def handle_incremental_oratory_feedback(
                             # Send the result to the REST endpoint and wait for completion
                             try:
                                 await send_analysis_result(user_id, result)
+                                try:
+                                    scheduler = ClipScheduler()
+                                    timeline = TimelineGenerator().build_timeline(result)
+                                    events = timeline.get("events", [])
+                                    if events:
+                                        video_path = self._coordinator.video_manager.get_video_path()
+                                        duration_sec = result.get("media", {}).get("duration_sec")
+                                        await scheduler.enqueue_session(
+                                            result.get("id", user_id),
+                                            events,
+                                            video_path=str(video_path) if video_path else None,
+                                            duration_sec=duration_sec
+                                        )
+                                finally:
+                                    await scheduler.close()
                                 # Send final status to client
                                 await websocket.send_json({
                                     "status": "completed",
@@ -589,6 +606,21 @@ async def handle_incremental_oratory_feedback(
                         # Send to REST endpoint and wait for completion
                         try:
                             await send_analysis_result(user_id, result)
+                            try:
+                                scheduler = ClipScheduler()
+                                timeline = TimelineGenerator().build_timeline(result)
+                                events = timeline.get("events", [])
+                                if events:
+                                    video_path = self._coordinator.video_manager.get_video_path()
+                                    duration_sec = result.get("media", {}).get("duration_sec")
+                                    await scheduler.enqueue_session(
+                                        result.get("id", user_id),
+                                        events,
+                                        video_path=str(video_path) if video_path else None,
+                                        duration_sec=duration_sec
+                                    )
+                            finally:
+                                await scheduler.close()
                             # Notify client
                             await websocket.send_json({
                                 "status": "completed",
@@ -639,6 +671,21 @@ async def handle_incremental_oratory_feedback(
                 try:
                     logger.info(f"Sending analysis result to backend for user {user_id}")
                     await send_analysis_result(user_id, result)
+                    try:
+                        scheduler = ClipScheduler()
+                        timeline = TimelineGenerator().build_timeline(result)
+                        events = timeline.get("events", [])
+                        if events:
+                            video_path = self._coordinator.video_manager.get_video_path()
+                            duration_sec = result.get("media", {}).get("duration_sec")
+                            await scheduler.enqueue_session(
+                                result.get("id", user_id),
+                                events,
+                                video_path=str(video_path) if video_path else None,
+                                duration_sec=duration_sec
+                            )
+                    finally:
+                        await scheduler.close()
                     logger.info(f"Analysis completed and saved after disconnect for user {user_id}")
                 except Exception as send_error:
                     logger.error(f"Failed to save analysis after disconnect: {send_error}")
