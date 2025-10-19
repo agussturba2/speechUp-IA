@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -40,17 +43,21 @@ class TimelineGenerator:
     def events_from_result(self, result: Dict[str, Any]) -> List[TimelineEvent]:
         """Extract timeline events from the aggregated analysis result."""
         raw_events: Iterable[Dict[str, Any]] = result.get("events", []) or []
+        logger.info(f"📋 Extracting timeline events from result: {len(raw_events)} raw events found")
         events: List[TimelineEvent] = []
 
         for entry in raw_events:
             event_type = entry.get("type") or entry.get("kind")
             if not event_type:
+                logger.debug(f"⚠️ Skipping event without type: {entry}")
                 continue
 
             start = self._extract_start(entry)
             end = self._extract_end(entry, start)
             severity = entry.get("severity") or self.default_severity
             metadata = self._extract_metadata(entry)
+            
+            logger.debug(f"📌 Event extracted: type={event_type}, start={start:.2f}s, end={end}, severity={severity}")
 
             events.append(
                 TimelineEvent(
@@ -61,16 +68,27 @@ class TimelineGenerator:
                     metadata=metadata,
                 )
             )
-
+        
+        logger.info(f"✅ Timeline extraction complete: {len(events)} valid events extracted")
         return events
 
     def build_timeline(self, result: Dict[str, Any]) -> Dict[str, Any]:
         """Return a summarized timeline structure for downstream consumers."""
+        logger.info("🏗️ Building timeline from analysis result")
         events = [event.to_dict() for event in self.events_from_result(result)]
-        return {
-            "duration": result.get("media", {}).get("duration_sec"),
+        duration = result.get("media", {}).get("duration_sec")
+        
+        timeline = {
+            "duration": duration,
             "events": events,
         }
+        
+        logger.info(f"✅ Timeline built: duration={duration}s, events={len(events)}")
+        if events:
+            event_types = {e['type'] for e in events}
+            logger.info(f"📊 Event types in timeline: {event_types}")
+        
+        return timeline
 
     @staticmethod
     def _extract_start(entry: Dict[str, Any]) -> float:

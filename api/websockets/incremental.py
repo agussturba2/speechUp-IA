@@ -520,17 +520,23 @@ async def handle_incremental_oratory_feedback(
                                 await send_analysis_result(user_id, result)
                                 try:
                                     scheduler = ClipScheduler()
+                                    logger.info(f"🎬 Building timeline for session {user_id}")
                                     timeline = TimelineGenerator().build_timeline(result)
                                     events = timeline.get("events", [])
+                                    logger.info(f"🎬 Timeline generated with {len(events)} events")
                                     if events:
                                         video_path = session._coordinator.video_manager.get_video_path()
                                         duration_sec = result.get("media", {}).get("duration_sec")
-                                        await scheduler.enqueue_session(
+                                        logger.info(f"🎬 Enqueuing clips: video_path={video_path}, duration={duration_sec}s, events={len(events)}")
+                                        enqueued_count = await scheduler.enqueue_session(
                                             result.get("id", user_id),
                                             events,
                                             video_path=str(video_path) if video_path else None,
                                             duration_sec=duration_sec
                                         )
+                                        logger.info(f"🎬 Successfully enqueued {enqueued_count} clip jobs to Redis")
+                                    else:
+                                        logger.warning(f"🎬 No events in timeline, skipping clip generation")
                                 finally:
                                     await scheduler.close()
                                 # Send final status to client
@@ -601,17 +607,23 @@ async def handle_incremental_oratory_feedback(
                             await send_analysis_result(user_id, result)
                             try:
                                 scheduler = ClipScheduler()
+                                logger.info(f"🎬 [TIMEOUT] Building timeline for session {user_id}")
                                 timeline = TimelineGenerator().build_timeline(result)
                                 events = timeline.get("events", [])
+                                logger.info(f"🎬 [TIMEOUT] Timeline generated with {len(events)} events")
                                 if events:
                                     video_path = session._coordinator.video_manager.get_video_path()
                                     duration_sec = result.get("media", {}).get("duration_sec")
-                                    await scheduler.enqueue_session(
+                                    logger.info(f"🎬 [TIMEOUT] Enqueuing clips: video_path={video_path}, duration={duration_sec}s")
+                                    enqueued_count = await scheduler.enqueue_session(
                                         result.get("id", user_id),
                                         events,
                                         video_path=str(video_path) if video_path else None,
                                         duration_sec=duration_sec
                                     )
+                                    logger.info(f"🎬 [TIMEOUT] Successfully enqueued {enqueued_count} clip jobs")
+                                else:
+                                    logger.warning(f"🎬 [TIMEOUT] No events in timeline, skipping clip generation")
                             finally:
                                 await scheduler.close()
                             # Notify client
@@ -666,17 +678,23 @@ async def handle_incremental_oratory_feedback(
                     await send_analysis_result(user_id, result)
                     try:
                         scheduler = ClipScheduler()
+                        logger.info(f"🎬 [DISCONNECT] Building timeline for session {user_id}")
                         timeline = TimelineGenerator().build_timeline(result)
                         events = timeline.get("events", [])
+                        logger.info(f"🎬 [DISCONNECT] Timeline generated with {len(events)} events")
                         if events:
                             video_path = session._coordinator.video_manager.get_video_path()
                             duration_sec = result.get("media", {}).get("duration_sec")
-                            await scheduler.enqueue_session(
+                            logger.info(f"🎬 [DISCONNECT] Enqueuing clips: video_path={video_path}, duration={duration_sec}s")
+                            enqueued_count = await scheduler.enqueue_session(
                                 result.get("id", user_id),
                                 events,
                                 video_path=str(video_path) if video_path else None,
                                 duration_sec=duration_sec
                             )
+                            logger.info(f"🎬 [DISCONNECT] Successfully enqueued {enqueued_count} clip jobs")
+                        else:
+                            logger.warning(f"🎬 [DISCONNECT] No events in timeline, skipping clip generation")
                     finally:
                         await scheduler.close()
                     logger.info(f"Analysis completed and saved after disconnect for user {user_id}")

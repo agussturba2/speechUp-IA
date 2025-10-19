@@ -131,13 +131,18 @@ class ClipScheduler:
 
         # Use Redis pipeline for batch operations
         if jobs:
+            logger.info(f"📦 Preparing to enqueue {len(jobs)} clip jobs for session {session_id}")
             async with redis.pipeline(transaction=True) as pipe:
                 for job in jobs:
-                    pipe.hset(f"{REDIS_CLIP_HASH_PREFIX}{job.job_id}", mapping=job.to_redis())
+                    job_dict = job.to_redis()
+                    logger.info(f"📦 Job {job.job_id}: type={job.event_type}, start={job.start_sec:.2f}s, end={job.end_sec:.2f}s, video={job.video_path}")
+                    pipe.hset(f"{REDIS_CLIP_HASH_PREFIX}{job.job_id}", mapping=job_dict)
                     pipe.rpush(REDIS_CLIP_QUEUE, job.job_id)
                 await pipe.execute()
                 enqueued = len(jobs)
-                logger.info("Enqueued %d clip jobs for session %s", enqueued, session_id)
+                logger.info(f"✅ Successfully enqueued {enqueued} clip jobs to Redis queue '{REDIS_CLIP_QUEUE}'")
+        else:
+            logger.warning(f"⚠️ No jobs to enqueue for session {session_id}")
 
         return enqueued
 

@@ -55,60 +55,82 @@ class IncrementalClipWorker:
     async def run_once(self) -> None:
         """Process a single job from the queue if available."""
         redis_conn = await self._get_redis()
+        logger.info(f"🔍 Worker polling Redis queue '{REDIS_CLIP_QUEUE}'...")
         job = await redis_conn.blpop(REDIS_CLIP_QUEUE, timeout=1)
         if not job:
             return
 
         _, job_id = job
+        logger.info(f"📥 Received job from queue: {job_id}")
         job_key = f"{REDIS_CLIP_HASH_PREFIX}{job_id}"
         payload = await redis_conn.hgetall(job_key)
         if not payload:
-            logger.warning("Clip job %s not found", job_id)
+            logger.warning(f"⚠️ Clip job {job_id} not found in Redis (key={job_key})")
             return
 
         clip_job = ClipJob.from_redis(payload)
-        logger.info("Processing clip job %s (type=%s)", job_id, clip_job.event_type)
+        logger.info(f"🎬 Processing clip job {job_id}: type={clip_job.event_type}, start={clip_job.start_sec:.2f}s, end={clip_job.end_sec:.2f}s")
 
         if not clip_job.video_path:
-            logger.warning("Clip job %s missing video_path", job_id)
+            logger.error(f"❌ Clip job {job_id} missing video_path")
             return
 
         if not self.clip_bucket:
+            logger.error(f"❌ CLIP_BUCKET not configured (current: {self.clip_bucket})")
             raise RuntimeError("CLIP_BUCKET environment variable is not set")
         if not self.clips_api_url:
+            logger.error(f"❌ CLIPS_API_URL not configured (current: {self.clips_api_url})")
             raise RuntimeError("CLIPS_API_URL environment variable is not set")
+        
+        logger.info(f"✅ Configuration validated: bucket={self.clip_bucket}, api={self.clips_api_url}")
 
         clip_path: Optional[Path] = None
         thumbnail_path: Optional[Path] = None
 
         try:
             # Validate video file exists
+            logger.info(f"🔍 Validating video file: {clip_job.video_path}")
             if not Path(clip_job.video_path).exists():
-                logger.error("Video file not found: %s", clip_job.video_path)
+                logger.error(f"❌ Video file not found: {clip_job.video_path}")
                 await redis_conn.delete(job_key)
                 return
+            
+            file_size = Path(clip_job.video_path).stat().st_size
+            logger.info(f"✅ Video file validated: {file_size} bytes")
 
             # Generate clip and thumbnail in parallel
+            logger.info(f"⚙️ Starting clip generation (parallel)...")
             clip_task = self._generate_clip(clip_job)
             thumbnail_task = self._generate_thumbnail_direct(clip_job)
             clip_path, thumbnail_path = await asyncio.gather(clip_task, thumbnail_task)
+            logger.info(f"✅ Clip and thumbnail generated: clip={clip_path}, thumb={thumbnail_path}")
 
+            logger.info(f"☁️ Uploading to S3 bucket '{self.clip_bucket}'...")
             clip_url, thumbnail_url = await self._upload_to_s3(clip_job, clip_path, thumbnail_path)
+            logger.info(f"✅ S3 upload complete: clip={clip_url}, thumb={thumbnail_url}")
+            
+            logger.info(f"📡 Notifying backend at {self.clips_api_url}...")
             await self._notify_backend(clip_job, clip_url, thumbnail_url)
+            logger.info(f"✅ Backend notified successfully")
+            
             await redis_conn.delete(job_key)
-            logger.info("Clip job %s completed", job_id)
+            logger.info(f"✅ Clip job {job_id} completed successfully")
         except Exception as exc:
-            logger.error("Failed processing clip job %s: %s", job_id, exc, exc_info=True)
+            logger.error(f"❌ Failed processing clip job {job_id}: {exc}", exc_info=True)
             
             # Retry logic with max attempts
             if clip_job.attempts >= self.max_retries:
                 await redis_conn.rpush("clip_jobs:failed", job_id)
-                logger.error("Job %s exceeded max retries (%d)", job_id, self.max_retries)
+                logger.error(f"💀 Job {job_id} exceeded max retries ({self.max_retries}), moved to failed queue")
             else:
+                new_attempts = clip_job.attempts + 1
+                backoff_time = 2 ** clip_job.attempts
+                logger.warning(f"🔄 Retrying job {job_id} (attempt {new_attempts}/{self.max_retries}) after {backoff_time}s backoff")
                 await redis_conn.hincrby(job_key, "attempts", 1)
                 # Exponential backoff
-                await asyncio.sleep(2 ** clip_job.attempts)
+                await asyncio.sleep(backoff_time)
                 await redis_conn.rpush(REDIS_CLIP_QUEUE, job_id)
+                logger.info(f"🔄 Job {job_id} re-enqueued")
         finally:
             if clip_path and clip_path.exists():
                 clip_path.unlink(missing_ok=True)
@@ -119,6 +141,8 @@ class IncrementalClipWorker:
         start = max(job.start_sec - job.margin_sec, 0.0)
         duration = (job.end_sec + job.margin_sec) - start
         clip_path = Path(tempfile.gettempdir()) / f"{job.job_id}.mp4"
+        
+        logger.info(f"🎞️ Generating clip: start={start:.2f}s, duration={duration:.2f}s -> {clip_path}")
 
         process = ffmpeg.input(job.video_path, ss=start, t=duration)
         output = ffmpeg.output(
@@ -130,15 +154,19 @@ class IncrementalClipWorker:
             movflags="faststart",
         )
         await asyncio.to_thread(output.run, overwrite_output=True, quiet=True)
+        logger.info(f"✅ Clip generated: {clip_path.stat().st_size} bytes")
         return clip_path
 
     async def _generate_thumbnail_direct(self, job: ClipJob) -> Path:
         """Generate thumbnail directly from source video (parallel with clip generation)."""
         midpoint = (job.start_sec + job.end_sec) / 2.0
         thumbnail_path = Path(tempfile.gettempdir()) / f"{job.job_id}.jpg"
+        
+        logger.info(f"📸 Generating thumbnail at {midpoint:.2f}s -> {thumbnail_path}")
         process = ffmpeg.input(job.video_path, ss=midpoint)
         output = ffmpeg.output(process, str(thumbnail_path), vframes=1)
         await asyncio.to_thread(output.run, overwrite_output=True, quiet=True)
+        logger.info(f"✅ Thumbnail generated: {thumbnail_path.stat().st_size} bytes")
         return thumbnail_path
 
     async def _upload_to_s3(self, job: ClipJob, clip_path: Path, thumbnail_path: Path) -> Tuple[str, str]:
@@ -202,12 +230,23 @@ class IncrementalClipWorker:
 
 
 async def main() -> None:
+    logger.info("🚀 Starting IncrementalClipWorker...")
     worker = IncrementalClipWorker()
+    logger.info(f"⚙️ Worker configuration:")
+    logger.info(f"   - Redis URL: {worker.redis_url}")
+    logger.info(f"   - S3 Bucket: {worker.clip_bucket}")
+    logger.info(f"   - API URL: {worker.clips_api_url}")
+    logger.info(f"   - Max Retries: {worker.max_retries}")
+    logger.info(f"🔄 Worker loop started, waiting for jobs...")
     try:
         while True:
             await worker.run_once()
+    except KeyboardInterrupt:
+        logger.info("⏸️ Worker stopped by user")
     finally:
+        logger.info("🛑 Shutting down worker...")
         await worker.close()
+        logger.info("✅ Worker shutdown complete")
 
 
 if __name__ == "__main__":
