@@ -760,6 +760,9 @@ def _build_fallback_events(session: IncrementalOratorySession, result: Dict[str,
         incremental = result.get("incremental_metrics") or {}
         fillers = result.get("recent_fillers") or []
         gestures = result.get("recent_gestures") or []
+        
+        logger.info(f"🔍 Fallback data: incremental={bool(incremental)}, fillers={len(fillers)}, gestures={len(gestures)}")
+        logger.info(f"🔍 Result structure: verbal={result.get('verbal', {}).get('fillers_per_min')}, events={len(result.get('events', []))}")
 
         # Use filler occurrences as clip events
         for filler in fillers:
@@ -783,24 +786,53 @@ def _build_fallback_events(session: IncrementalOratorySession, result: Dict[str,
                 "metadata": {"label": gesture.get("label"), "score": gesture.get("score")}
             })
 
-        # If still empty, create summary events from metrics
+        # If still empty, extract from verbal filler data if available
+        if not events:
+            verbal = result.get("verbal", {})
+            fillers_per_min = verbal.get("fillers_per_min", 0)
+            duration = result.get("media", {}).get("duration_sec", 0)
+            
+            logger.info(f"🔍 Trying verbal extraction: fillers_per_min={fillers_per_min}, duration={duration}")
+            
+            # If fillers detected but no specific occurrences, create synthetic events
+            if fillers_per_min > 0 and duration > 0:
+                num_clips = min(int(fillers_per_min * duration / 60), 5)  # Max 5 clips
+                logger.info(f"🔍 Creating {num_clips} synthetic filler events")
+                
+                for i in range(num_clips):
+                    # Distribute clips evenly across duration
+                    start = (duration / (num_clips + 1)) * (i + 1) - 2.0
+                    start = max(0, start)
+                    end = min(start + 4.0, duration)
+                    
+                    events.append({
+                        "type": "filler",
+                        "start": start,
+                        "end": end,
+                        "metadata": {"synthetic": True, "fillers_per_min": fillers_per_min}
+                    })
+        
+        # Last resort: create one summary clip if we have valid metrics
         if not events and incremental:
-            duration = result.get("media", {}).get("duration_sec") or session._coordinator.get_video_path()  # type: ignore[attr-defined]
-            events.append({
-                "type": "summary",
-                "start": 0.0,
-                "end": duration or 10.0,
-                "metadata": {
-                    "wpm": incremental.get("wpm"),
-                    "fillers_per_min": incremental.get("fillers_per_min"),
-                    "gesture_rate": incremental.get("gesture_rate"),
-                    "expression_variability": incremental.get("expression_variability")
-                }
-            })
+            duration = result.get("media", {}).get("duration_sec", 0)
+            if duration > 5:
+                logger.info(f"🔍 Creating summary event as last resort")
+                events.append({
+                    "type": "summary",
+                    "start": max(0, duration / 2 - 5),
+                    "end": min(duration, duration / 2 + 5),
+                    "metadata": {
+                        "wpm": incremental.get("wpm"),
+                        "fillers_per_min": incremental.get("fillers_per_min"),
+                        "gesture_rate": incremental.get("gesture_rate"),
+                        "expression_variability": incremental.get("expression_variability")
+                    }
+                })
 
     except Exception as exc:
         logger.error(f"Failed to build fallback events: {exc}", exc_info=True)
-
+    
+    logger.info(f"🔍 Fallback generated {len(events)} events")
     return events
 
 
