@@ -671,7 +671,7 @@ async def handle_incremental_oratory_feedback(
         logger.info(f"WebSocket client disconnected (session exists: {session is not None})")
         
         # If we received frames, complete the analysis
-        if ses<sion:
+        if session:
             logger.info(f"Session frame_count: {session.frame_count}")
             
         if session and session.frame_count > 0:
@@ -750,3 +750,60 @@ async def handle_incremental_oratory_feedback(
                 logger.info("Session resources cleaned up")
             except Exception as cleanup_error:
                 logger.error(f"Error during session cleanup: {cleanup_error}")
+
+
+def _build_fallback_events(session: IncrementalOratorySession, result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Build synthetic timeline events from incremental metrics when no events are present."""
+    events: List[Dict[str, Any]] = []
+
+    try:
+        incremental = result.get("incremental_metrics") or {}
+        fillers = result.get("recent_fillers") or []
+        gestures = result.get("recent_gestures") or []
+
+        # Use filler occurrences as clip events
+        for filler in fillers:
+            start = float(filler.get("start", filler.get("timestamp", 0.0)))
+            end = float(filler.get("end", start + 2.0))
+            events.append({
+                "type": "filler",
+                "start": start,
+                "end": end,
+                "metadata": {"word": filler.get("word", "eh"), "confidence": filler.get("confidence")}
+            })
+
+        # Use gestures if available
+        for gesture in gestures:
+            start = float(gesture.get("start", gesture.get("timestamp", 0.0)))
+            end = float(gesture.get("end", start + 2.0))
+            events.append({
+                "type": gesture.get("type", "gesture"),
+                "start": start,
+                "end": end,
+                "metadata": {"label": gesture.get("label"), "score": gesture.get("score")}
+            })
+
+        # If still empty, create summary events from metrics
+        if not events and incremental:
+            duration = result.get("media", {}).get("duration_sec") or session._coordinator.get_video_path()  # type: ignore[attr-defined]
+            events.append({
+                "type": "summary",
+                "start": 0.0,
+                "end": duration or 10.0,
+                "metadata": {
+                    "wpm": incremental.get("wpm"),
+                    "fillers_per_min": incremental.get("fillers_per_min"),
+                    "gesture_rate": incremental.get("gesture_rate"),
+                    "expression_variability": incremental.get("expression_variability")
+                }
+            })
+
+    except Exception as exc:
+        logger.error(f"Failed to build fallback events: {exc}", exc_info=True)
+
+    return events
+
+
+__all__ = [
+    "handle_incremental_oratory_feedback",
+]
