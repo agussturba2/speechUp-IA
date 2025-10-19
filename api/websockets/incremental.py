@@ -12,7 +12,7 @@ import logging
 import os
 import time
 import json
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from pathlib import Path
 import cv2
 from fastapi import WebSocket, WebSocketDisconnect
