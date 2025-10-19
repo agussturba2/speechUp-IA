@@ -520,6 +520,9 @@ async def handle_incremental_oratory_feedback(
                                 await send_analysis_result(user_id, result)
                                 try:
                                     scheduler = ClipScheduler()
+                                    raw_events = result.get("events", []) or []
+                                    logger.info(f"🧾 Result keys: {list(result.keys())}")
+                                    logger.info(f"🧾 Raw events received: {len(raw_events)} -> {raw_events[:3] if raw_events else '[]'}")
                                     logger.info(f"🎬 Building timeline for session {user_id}")
                                     timeline = TimelineGenerator().build_timeline(result)
                                     events = timeline.get("events", [])
@@ -607,6 +610,9 @@ async def handle_incremental_oratory_feedback(
                             await send_analysis_result(user_id, result)
                             try:
                                 scheduler = ClipScheduler()
+                                raw_events = result.get("events", []) or []
+                                logger.info(f"🧾 [TIMEOUT] Result keys: {list(result.keys())}")
+                                logger.info(f"🧾 [TIMEOUT] Raw events: {len(raw_events)} -> {raw_events[:3] if raw_events else '[]'}")
                                 logger.info(f"🎬 [TIMEOUT] Building timeline for session {user_id}")
                                 timeline = TimelineGenerator().build_timeline(result)
                                 events = timeline.get("events", [])
@@ -678,6 +684,9 @@ async def handle_incremental_oratory_feedback(
                     await send_analysis_result(user_id, result)
                     try:
                         scheduler = ClipScheduler()
+                        raw_events = result.get("events", []) or []
+                        logger.info(f"🧾 [DISCONNECT] Result keys: {list(result.keys())}")
+                        logger.info(f"🧾 [DISCONNECT] Raw events: {len(raw_events)} -> {raw_events[:3] if raw_events else '[]'}")
                         logger.info(f"🎬 [DISCONNECT] Building timeline for session {user_id}")
                         timeline = TimelineGenerator().build_timeline(result)
                         events = timeline.get("events", [])
