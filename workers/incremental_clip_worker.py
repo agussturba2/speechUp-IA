@@ -153,7 +153,14 @@ class IncrementalClipWorker:
             preset="veryfast",
             movflags="faststart",
         )
-        await asyncio.to_thread(output.run, overwrite_output=True, quiet=True)
+        try:
+            await asyncio.to_thread(output.run, overwrite_output=True, capture_stdout=True, capture_stderr=True)
+        except ffmpeg.Error as e:
+            logger.error(f"❌ FFmpeg error generating clip:")
+            logger.error(f"   Command: {' '.join(output.compile())}")
+            logger.error(f"   Stdout: {e.stdout.decode() if e.stdout else 'N/A'}")
+            logger.error(f"   Stderr: {e.stderr.decode() if e.stderr else 'N/A'}")
+            raise
         logger.info(f"✅ Clip generated: {clip_path.stat().st_size} bytes")
         return clip_path
 
@@ -165,7 +172,14 @@ class IncrementalClipWorker:
         logger.info(f"📸 Generating thumbnail at {midpoint:.2f}s -> {thumbnail_path}")
         process = ffmpeg.input(job.video_path, ss=midpoint)
         output = ffmpeg.output(process, str(thumbnail_path), vframes=1)
-        await asyncio.to_thread(output.run, overwrite_output=True, quiet=True)
+        try:
+            await asyncio.to_thread(output.run, overwrite_output=True, capture_stdout=True, capture_stderr=True)
+        except ffmpeg.Error as e:
+            logger.error(f"❌ FFmpeg error generating thumbnail:")
+            logger.error(f"   Command: {' '.join(output.compile())}")
+            logger.error(f"   Stdout: {e.stdout.decode() if e.stdout else 'N/A'}")
+            logger.error(f"   Stderr: {e.stderr.decode() if e.stderr else 'N/A'}")
+            raise
         logger.info(f"✅ Thumbnail generated: {thumbnail_path.stat().st_size} bytes")
         return thumbnail_path
 
