@@ -531,7 +531,7 @@ async def handle_incremental_oratory_feedback(
                                         fallback_events = _build_fallback_events(session, result)
                                         events = fallback_events
                                         timeline["events"] = events
-                                        logger.info(f"🎯 Fallback produced {len(events)} events")
+                                        logger.warning(f"🎯 Fallback produced {len(events)} events")
                                     logger.info(f"🎬 Timeline generated with {len(events)} events")
                                     if events:
                                         video_path = session._coordinator.video_manager.get_video_path()
@@ -627,7 +627,7 @@ async def handle_incremental_oratory_feedback(
                                     fallback_events = _build_fallback_events(session, result)
                                     events = fallback_events
                                     timeline["events"] = events
-                                    logger.info(f"🎯 [TIMEOUT] Fallback produced {len(events)} events")
+                                    logger.warning(f"🎯 [TIMEOUT] Fallback produced {len(events)} events")
                                 logger.info(f"🎬 [TIMEOUT] Timeline generated with {len(events)} events")
                                 if events:
                                     video_path = session._coordinator.video_manager.get_video_path()
@@ -761,8 +761,8 @@ def _build_fallback_events(session: IncrementalOratorySession, result: Dict[str,
         fillers = result.get("recent_fillers") or []
         gestures = result.get("recent_gestures") or []
         
-        logger.info(f"🔍 Fallback data: incremental={bool(incremental)}, fillers={len(fillers)}, gestures={len(gestures)}")
-        logger.info(f"🔍 Result structure: verbal={result.get('verbal', {}).get('fillers_per_min')}, events={len(result.get('events', []))}")
+        logger.warning(f"🔍 Fallback data: incremental={bool(incremental)}, fillers={len(fillers)}, gestures={len(gestures)}")
+        logger.warning(f"🔍 Result structure: verbal={result.get('verbal', {}).get('fillers_per_min')}, events={len(result.get('events', []))}")
 
         # Use filler occurrences as clip events
         for filler in fillers:
@@ -792,12 +792,12 @@ def _build_fallback_events(session: IncrementalOratorySession, result: Dict[str,
             fillers_per_min = verbal.get("fillers_per_min", 0)
             duration = result.get("media", {}).get("duration_sec", 0)
             
-            logger.info(f"🔍 Trying verbal extraction: fillers_per_min={fillers_per_min}, duration={duration}")
+            logger.warning(f"🔍 Trying verbal extraction: fillers_per_min={fillers_per_min}, duration={duration}")
             
             # If fillers detected but no specific occurrences, create synthetic events
             if fillers_per_min > 0 and duration > 0:
                 num_clips = min(int(fillers_per_min * duration / 60), 5)  # Max 5 clips
-                logger.info(f"🔍 Creating {num_clips} synthetic filler events")
+                logger.warning(f"🔍 Creating {num_clips} synthetic filler events")
                 
                 for i in range(num_clips):
                     # Distribute clips evenly across duration
@@ -816,7 +816,7 @@ def _build_fallback_events(session: IncrementalOratorySession, result: Dict[str,
         if not events and incremental:
             duration = result.get("media", {}).get("duration_sec", 0)
             if duration > 5:
-                logger.info(f"🔍 Creating summary event as last resort")
+                logger.warning(f"🔍 Creating summary event as last resort (duration={duration})")
                 events.append({
                     "type": "summary",
                     "start": max(0, duration / 2 - 5),
@@ -830,9 +830,9 @@ def _build_fallback_events(session: IncrementalOratorySession, result: Dict[str,
                 })
 
     except Exception as exc:
-        logger.error(f"Failed to build fallback events: {exc}", exc_info=True)
+        logger.error(f"❌ Failed to build fallback events: {exc}", exc_info=True)
     
-    logger.info(f"🔍 Fallback generated {len(events)} events")
+    logger.warning(f"🔍 Fallback generated {len(events)} events")
     return events
 
 
