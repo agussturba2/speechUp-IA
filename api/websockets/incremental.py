@@ -814,30 +814,36 @@ def _build_fallback_events(session: IncrementalOratorySession, result: Dict[str,
         
         # Last resort: create one summary clip if we have any valid duration
         if not events:
-            duration = result.get("media", {}).get("duration_sec", 0)
+            duration = result.get("media", {}).get("duration_sec", 0.0) or 0.0
             verbal = result.get("verbal", {})
             
-            # Create summary clip if duration is at least 3 seconds
-            if duration >= 3:
-                clip_duration = min(10, duration)  # Max 10s clip
-                start = max(0, (duration - clip_duration) / 2)
-                end = start + clip_duration
+            if duration > 0:
+                clip_duration = min(10.0, max(duration, 2.0))  # ensure at least 2s clip window
+                clip_duration = min(clip_duration, max(duration, 2.0)) if duration < 2.0 else min(10.0, duration)
+                start = max(0.0, (duration - clip_duration) / 2.0)
+                end = min(duration, start + clip_duration)
                 
-                logger.warning(f"🔍 Creating summary event as last resort (duration={duration}s, clip={clip_duration}s)")
+                # Adjust to cover entire duration when video shorter than clip window
+                if end - start < duration:
+                    start = 0.0
+                    end = duration
+                    clip_duration = duration
+
+                logger.warning(f"🔍 Creating summary event as last resort (duration={duration:.2f}s, clip={clip_duration:.2f}s)")
                 events.append({
                     "type": "summary",
                     "start": start,
                     "end": end,
                     "metadata": {
-                        "wpm": verbal.get("wpm") or incremental.get("wpm"),
-                        "fillers_per_min": verbal.get("fillers_per_min") or incremental.get("fillers_per_min"),
-                        "gesture_rate": incremental.get("gesture_rate") if incremental else None,
-                        "expression_variability": incremental.get("expression_variability") if incremental else None,
+                        "wpm": verbal.get("wpm") or (incremental or {}).get("wpm"),
+                        "fillers_per_min": verbal.get("fillers_per_min") or (incremental or {}).get("fillers_per_min"),
+                        "gesture_rate": (incremental or {}).get("gesture_rate"),
+                        "expression_variability": (incremental or {}).get("expression_variability"),
                         "fallback": "last_resort"
                     }
                 })
             else:
-                logger.warning(f"🔍 Duration too short for summary clip: {duration}s < 3s")
+                logger.warning(f"🔍 Duration too short for summary clip: {duration}s <= 0")
 
     except Exception as exc:
         logger.error(f"❌ Failed to build fallback events: {exc}", exc_info=True)
