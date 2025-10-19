@@ -521,9 +521,9 @@ async def handle_incremental_oratory_feedback(
                                 try:
                                     scheduler = ClipScheduler()
                                     raw_events = result.get("events", []) or []
-                                    logger.info(f"🧾 Result keys: {list(result.keys())}")
-                                    logger.info(f"🧾 Raw events received: {len(raw_events)} -> {raw_events[:3] if raw_events else '[]'}")
-                                    logger.info(f"🎬 Building timeline for session {user_id}")
+                                    logger.warning(f"🧾 Result keys: {list(result.keys())}")
+                                    logger.warning(f"🧾 Raw events received: {len(raw_events)} -> {raw_events[:3] if raw_events else '[]'}")
+                                    logger.warning(f"🎬 Building timeline for session {user_id}")
                                     timeline = TimelineGenerator().build_timeline(result)
                                     events = timeline.get("events", [])
                                     if not events:
@@ -532,18 +532,18 @@ async def handle_incremental_oratory_feedback(
                                         events = fallback_events
                                         timeline["events"] = events
                                         logger.warning(f"🎯 Fallback produced {len(events)} events")
-                                    logger.info(f"🎬 Timeline generated with {len(events)} events")
+                                    logger.warning(f"🎬 Timeline generated with {len(events)} events")
                                     if events:
                                         video_path = session._coordinator.video_manager.get_video_path()
                                         duration_sec = result.get("media", {}).get("duration_sec")
-                                        logger.info(f"🎬 Enqueuing clips: video_path={video_path}, duration={duration_sec}s, events={len(events)}")
+                                        logger.warning(f"🎬 Enqueuing clips: video_path={video_path}, duration={duration_sec}s, events={len(events)}")
                                         enqueued_count = await scheduler.enqueue_session(
                                             result.get("id", user_id),
                                             events,
                                             video_path=str(video_path) if video_path else None,
                                             duration_sec=duration_sec
                                         )
-                                        logger.info(f"🎬 Successfully enqueued {enqueued_count} clip jobs to Redis")
+                                        logger.warning(f"🎬 Successfully enqueued {enqueued_count} clip jobs to Redis")
                                     else:
                                         logger.warning(f"🎬 No events in timeline, skipping clip generation")
                                 finally:
@@ -617,9 +617,9 @@ async def handle_incremental_oratory_feedback(
                             try:
                                 scheduler = ClipScheduler()
                                 raw_events = result.get("events", []) or []
-                                logger.info(f"🧾 [TIMEOUT] Result keys: {list(result.keys())}")
-                                logger.info(f"🧾 [TIMEOUT] Raw events: {len(raw_events)} -> {raw_events[:3] if raw_events else '[]'}")
-                                logger.info(f"🎬 [TIMEOUT] Building timeline for session {user_id}")
+                                logger.warning(f"🧾 [TIMEOUT] Result keys: {list(result.keys())}")
+                                logger.warning(f"🧾 [TIMEOUT] Raw events: {len(raw_events)} -> {raw_events[:3] if raw_events else '[]'}")
+                                logger.warning(f"🎬 [TIMEOUT] Building timeline for session {user_id}")
                                 timeline = TimelineGenerator().build_timeline(result)
                                 events = timeline.get("events", [])
                                 if not events:
@@ -628,18 +628,18 @@ async def handle_incremental_oratory_feedback(
                                     events = fallback_events
                                     timeline["events"] = events
                                     logger.warning(f"🎯 [TIMEOUT] Fallback produced {len(events)} events")
-                                logger.info(f"🎬 [TIMEOUT] Timeline generated with {len(events)} events")
+                                logger.warning(f"🎬 [TIMEOUT] Timeline generated with {len(events)} events")
                                 if events:
                                     video_path = session._coordinator.video_manager.get_video_path()
                                     duration_sec = result.get("media", {}).get("duration_sec")
-                                    logger.info(f"🎬 [TIMEOUT] Enqueuing clips: video_path={video_path}, duration={duration_sec}s")
+                                    logger.warning(f"🎬 [TIMEOUT] Enqueuing clips: video_path={video_path}, duration={duration_sec}s")
                                     enqueued_count = await scheduler.enqueue_session(
                                         result.get("id", user_id),
                                         events,
                                         video_path=str(video_path) if video_path else None,
                                         duration_sec=duration_sec
                                     )
-                                    logger.info(f"🎬 [TIMEOUT] Successfully enqueued {enqueued_count} clip jobs")
+                                    logger.warning(f"🎬 [TIMEOUT] Successfully enqueued {enqueued_count} clip jobs")
                                 else:
                                     logger.warning(f"🎬 [TIMEOUT] No events in timeline, skipping clip generation")
                             finally:
@@ -697,23 +697,23 @@ async def handle_incremental_oratory_feedback(
                     try:
                         scheduler = ClipScheduler()
                         raw_events = result.get("events", []) or []
-                        logger.info(f"🧾 [DISCONNECT] Result keys: {list(result.keys())}")
-                        logger.info(f"🧾 [DISCONNECT] Raw events: {len(raw_events)} -> {raw_events[:3] if raw_events else '[]'}")
-                        logger.info(f"🎬 [DISCONNECT] Building timeline for session {user_id}")
+                        logger.warning(f"🧾 [DISCONNECT] Result keys: {list(result.keys())}")
+                        logger.warning(f"🧾 [DISCONNECT] Raw events: {len(raw_events)} -> {raw_events[:3] if raw_events else '[]'}")
+                        logger.warning(f"🎬 [DISCONNECT] Building timeline for session {user_id}")
                         timeline = TimelineGenerator().build_timeline(result)
                         events = timeline.get("events", [])
-                        logger.info(f"🎬 [DISCONNECT] Timeline generated with {len(events)} events")
+                        logger.warning(f"🎬 [DISCONNECT] Timeline generated with {len(events)} events")
                         if events:
                             video_path = session._coordinator.video_manager.get_video_path()
                             duration_sec = result.get("media", {}).get("duration_sec")
-                            logger.info(f"🎬 [DISCONNECT] Enqueuing clips: video_path={video_path}, duration={duration_sec}s")
+                            logger.warning(f"🎬 [DISCONNECT] Enqueuing clips: video_path={video_path}, duration={duration_sec}s")
                             enqueued_count = await scheduler.enqueue_session(
                                 result.get("id", user_id),
                                 events,
                                 video_path=str(video_path) if video_path else None,
                                 duration_sec=duration_sec
                             )
-                            logger.info(f"🎬 [DISCONNECT] Successfully enqueued {enqueued_count} clip jobs")
+                            logger.warning(f"🎬 [DISCONNECT] Successfully enqueued {enqueued_count} clip jobs")
                         else:
                             logger.warning(f"🎬 [DISCONNECT] No events in timeline, skipping clip generation")
                     finally:
