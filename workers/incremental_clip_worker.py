@@ -199,10 +199,9 @@ class IncrementalClipWorker:
             process
             .output(
                 str(clip_path),
-                vcodec="libx264",
-                acodec="aac",
+                vcodec="copy",  # Use stream copy (no re-encoding) since libx264 is not available
+                acodec="copy",
                 movflags="faststart"
-                # Omit preset for now - can add back as -preset:v veryfast later
             )
         )
         try:
