@@ -195,13 +195,15 @@ class IncrementalClipWorker:
         logger.info(f"🎞️ Generating clip: start={start:.2f}s, duration={duration:.2f}s -> {clip_path}")
 
         process = ffmpeg.input(job.video_path, ss=start, t=duration)
-        output = ffmpeg.output(
-            process,
-            str(clip_path),
-            vcodec="libx264",
-            preset="veryfast",
-            acodec="aac",
-            movflags="faststart",
+        output = (
+            process
+            .output(
+                str(clip_path),
+                vcodec="libx264",
+                acodec="aac",
+                movflags="faststart"
+                # Omit preset for now - can add back as -preset:v veryfast later
+            )
         )
         try:
             await asyncio.to_thread(output.run, overwrite_output=True, capture_stdout=True, capture_stderr=True)
