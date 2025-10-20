@@ -27,6 +27,7 @@ class ClipJob:
 
     job_id: str
     session_id: str
+    user_id: str
     event_type: str
     start_sec: float
     end_sec: float
@@ -67,6 +68,7 @@ class ClipJob:
         return cls(
             job_id=data["job_id"],
             session_id=data.get("session_id", "unknown"),
+            user_id=data.get("user_id", data.get("session_id", "unknown")),
             event_type=data.get("event_type", "unknown"),
             start_sec=_parse_float(data.get("start_sec")),
             end_sec=_parse_float(data.get("end_sec")),
@@ -97,6 +99,7 @@ class ClipScheduler:
         session_id: str,
         events: Iterable[dict],
         *,
+        user_id: Optional[str] = None,
         video_path: Optional[str] = None,
         duration_sec: Optional[float] = None,
     ) -> int:
@@ -121,6 +124,7 @@ class ClipScheduler:
             job = ClipJob(
                 job_id=str(uuid.uuid4()),
                 session_id=session_id,
+                user_id=user_id or session_id,
                 event_type=event_type,
                 start_sec=start_sec,
                 end_sec=end_sec,

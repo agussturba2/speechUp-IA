@@ -265,7 +265,7 @@ class IncrementalClipWorker:
         duration = job.duration_sec or max(job.end_sec - job.start_sec, 0.0)
         payload = {
             "sessionId": job.session_id,
-            "userId": job.session_id,  # adjust if userId is tracked separately
+            "userId": job.user_id,
             "eventType": job.event_type,
             "startSec": f"{job.start_sec:.4f}",
             "endSec": f"{job.end_sec:.4f}",

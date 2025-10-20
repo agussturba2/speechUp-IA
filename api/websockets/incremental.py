@@ -517,7 +517,7 @@ async def handle_incremental_oratory_feedback(
                             
                             # Send the result to the REST endpoint and wait for completion
                             try:
-                                await send_analysis_result(user_id, result)
+                                db_session_id, db_user_id = await send_analysis_result(user_id, result)
                                 try:
                                     scheduler = ClipScheduler()
                                     raw_events = result.get("events", []) or []
@@ -537,13 +537,15 @@ async def handle_incremental_oratory_feedback(
                                         video_path = session._coordinator.video_manager.get_video_path()
                                         duration_sec = result.get("media", {}).get("duration_sec")
                                         
+                                        # Use database session ID for S3 key
+                                        session_id_for_s3 = str(db_session_id) if db_session_id else user_id
+                                        
                                         # Upload video to S3 before enqueuing clips
                                         video_s3_url = None
                                         if video_path and video_path.exists():
                                             from api.services.s3_client import get_s3_client
                                             import boto3
-                                            session_id = result.get("id", user_id)
-                                            s3_key = f"temp-videos/{session_id}/{video_path.name}"
+                                            s3_key = f"temp-videos/{session_id_for_s3}/{video_path.name}"
                                             s3_client = await get_s3_client()
                                             bucket = os.getenv("CLIP_BUCKET", "clips-bucket-speech-up")
                                             await asyncio.to_thread(
@@ -555,12 +557,16 @@ async def handle_incremental_oratory_feedback(
                                             video_s3_url = f"s3://{bucket}/{s3_key}"
                                             logger.warning(f"📤 Uploaded video to S3: {video_s3_url}")
                                         
-                                        logger.warning(f"🎬 Enqueuing clips: video_path={video_s3_url}, duration={duration_sec}s, events={len(events)}")
+                                        # Use database IDs for clip jobs
+                                        session_id_for_clips = db_session_id if db_session_id else user_id
+                                        user_id_for_clips = db_user_id if db_user_id else user_id
+                                        logger.warning(f"🎬 Enqueuing clips: session_id={session_id_for_clips}, user_id={user_id_for_clips}, video_path={video_s3_url}, duration={duration_sec}s, events={len(events)}")
                                         enqueued_count = await scheduler.enqueue_session(
-                                            result.get("id", user_id),
+                                            session_id_for_clips,
                                             events,
                                             video_path=video_s3_url,
-                                            duration_sec=duration_sec
+                                            duration_sec=duration_sec,
+                                            user_id=user_id_for_clips
                                         )
                                         logger.warning(f"🎬 Successfully enqueued {enqueued_count} clip jobs to Redis")
                                     else:
@@ -632,7 +638,7 @@ async def handle_incremental_oratory_feedback(
                             
                         # Send to REST endpoint and wait for completion
                         try:
-                            await send_analysis_result(user_id, result)
+                            db_session_id, db_user_id = await send_analysis_result(user_id, result)
                             try:
                                 scheduler = ClipScheduler()
                                 raw_events = result.get("events", []) or []
@@ -652,13 +658,15 @@ async def handle_incremental_oratory_feedback(
                                     video_path = session._coordinator.video_manager.get_video_path()
                                     duration_sec = result.get("media", {}).get("duration_sec")
                                     
+                                    # Use database session ID for S3 key
+                                    session_id_for_s3 = str(db_session_id) if db_session_id else user_id
+                                    
                                     # Upload video to S3 before enqueuing clips
                                     video_s3_url = None
                                     if video_path and video_path.exists():
                                         from api.services.s3_client import get_s3_client
                                         import boto3
-                                        session_id = result.get("id", user_id)
-                                        s3_key = f"temp-videos/{session_id}/{video_path.name}"
+                                        s3_key = f"temp-videos/{session_id_for_s3}/{video_path.name}"
                                         s3_client = await get_s3_client()
                                         bucket = os.getenv("CLIP_BUCKET", "clips-bucket-speech-up")
                                         await asyncio.to_thread(
@@ -670,10 +678,14 @@ async def handle_incremental_oratory_feedback(
                                         video_s3_url = f"s3://{bucket}/{s3_key}"
                                         logger.warning(f"📤 [TIMEOUT] Uploaded video to S3: {video_s3_url}")
                                     
-                                    logger.warning(f"🎬 [TIMEOUT] Enqueuing clips: video_path={video_s3_url}, duration={duration_sec}s")
+                                    # Use database IDs for clip jobs
+                                    session_id_for_clips = db_session_id if db_session_id else user_id
+                                    user_id_for_clips = db_user_id if db_user_id else user_id
+                                    logger.warning(f"🎬 [TIMEOUT] Enqueuing clips: session_id={session_id_for_clips}, user_id={user_id_for_clips}, video_path={video_s3_url}, duration={duration_sec}s")
                                     enqueued_count = await scheduler.enqueue_session(
-                                        result.get("id", user_id),
+                                        session_id_for_clips,
                                         events,
+                                        user_id=user_id_for_clips,
                                         video_path=video_s3_url,
                                         duration_sec=duration_sec
                                     )
@@ -731,7 +743,7 @@ async def handle_incremental_oratory_feedback(
                 
                 try:
                     logger.info(f"Sending analysis result to backend for user {user_id}")
-                    await send_analysis_result(user_id, result)
+                    db_session_id, db_user_id = await send_analysis_result(user_id, result)
                     try:
                         scheduler = ClipScheduler()
                         raw_events = result.get("events", []) or []
@@ -745,13 +757,15 @@ async def handle_incremental_oratory_feedback(
                             video_path = session._coordinator.video_manager.get_video_path()
                             duration_sec = result.get("media", {}).get("duration_sec")
                             
+                            # Use database session ID for S3 key
+                            session_id_for_s3 = str(db_session_id) if db_session_id else user_id
+                            
                             # Upload video to S3 before enqueuing clips
                             video_s3_url = None
                             if video_path and video_path.exists():
                                 from api.services.s3_client import get_s3_client
                                 import boto3
-                                session_id = result.get("id", user_id)
-                                s3_key = f"temp-videos/{session_id}/{video_path.name}"
+                                s3_key = f"temp-videos/{session_id_for_s3}/{video_path.name}"
                                 s3_client = await get_s3_client()
                                 bucket = os.getenv("CLIP_BUCKET", "clips-bucket-speech-up")
                                 await asyncio.to_thread(
@@ -763,10 +777,14 @@ async def handle_incremental_oratory_feedback(
                                 video_s3_url = f"s3://{bucket}/{s3_key}"
                                 logger.warning(f"📤 [DISCONNECT] Uploaded video to S3: {video_s3_url}")
                             
-                            logger.warning(f"🎬 [DISCONNECT] Enqueuing clips: video_path={video_s3_url}, duration={duration_sec}s")
+                            # Use database IDs for clip jobs
+                            session_id_for_clips = db_session_id if db_session_id else user_id
+                            user_id_for_clips = db_user_id if db_user_id else user_id
+                            logger.warning(f"🎬 [DISCONNECT] Enqueuing clips: session_id={session_id_for_clips}, user_id={user_id_for_clips}, video_path={video_s3_url}, duration={duration_sec}s")
                             enqueued_count = await scheduler.enqueue_session(
-                                result.get("id", user_id),
+                                session_id_for_clips,
                                 events,
+                                user_id=user_id_for_clips,
                                 video_path=video_s3_url,
                                 duration_sec=duration_sec
                             )

@@ -7,7 +7,7 @@ import os
 import time
 import tempfile
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import cv2
 from fastapi import WebSocket, WebSocketDisconnect
 from collections import deque
@@ -168,7 +168,13 @@ def process_pipeline_results(proc: Dict[str, Any], analysis_time: float) -> Dict
         return result
 
 # Función para enviar resultados al endpoint REST
-async def send_analysis_result(user_id: str, result: Dict[str, Any]):
+async def send_analysis_result(user_id: str, result: Dict[str, Any]) -> tuple[Optional[int], Optional[int]]:
+    """
+    Send analysis result to backend and return the database IDs.
+    
+    Returns:
+        tuple: (session_id: int, user_id: int) or (None, None) if failed
+    """
     url = "http://98.91.55.213:7070/session"
     params = {"userId": user_id}
     
@@ -184,9 +190,24 @@ async def send_analysis_result(user_id: str, result: Dict[str, Any]):
             response.raise_for_status()
             logger.error(f"✅ DATABASE INSERT SUCCESSFUL - Status: {response.status_code}")
             logger.info(f"Analysis result sent to {url} successfully")
+            
+            # Extract session ID and user ID from response
+            response_data = response.json()
+            session_id = response_data.get("id") or response_data.get("sessionId")
+            user_id_from_db = response_data.get("userId") or response_data.get("user_id")
+            
+            if session_id and user_id_from_db:
+                session_id_int = int(session_id) if isinstance(session_id, (str, int)) else None
+                user_id_int = int(user_id_from_db) if isinstance(user_id_from_db, (str, int)) else None
+                logger.info(f"✅ Got database IDs - session_id: {session_id_int}, user_id: {user_id_int}")
+                return (session_id_int, user_id_int)
+            else:
+                logger.warning(f"⚠️ Missing IDs in response: {response_data}")
+                return (None, None)
     except Exception as e:
         logger.error(f"❌ DATABASE INSERT FAILED - Error: {e}")
         logger.error(f"Failed to send analysis result to {url}: {e}")
+        return (None, None)
 
 class OratorySession:
     """
