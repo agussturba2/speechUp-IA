@@ -193,16 +193,30 @@ async def send_analysis_result(user_id: str, result: Dict[str, Any]) -> tuple[Op
             
             # Extract session ID and user ID from response
             response_data = response.json()
-            session_id = response_data.get("id") or response_data.get("sessionId")
-            user_id_from_db = response_data.get("userId") or response_data.get("user_id")
             
-            if session_id and user_id_from_db:
-                session_id_int = int(session_id) if isinstance(session_id, (str, int)) else None
-                user_id_int = int(user_id_from_db) if isinstance(user_id_from_db, (str, int)) else None
-                logger.info(f"✅ Got database IDs - session_id: {session_id_int}, user_id: {user_id_int}")
+            # Handle case where backend returns just the session_id as an integer
+            if isinstance(response_data, int):
+                session_id_int = response_data
+                # Parse userId from request parameter since backend doesn't return it
+                user_id_int = int(user_id) if user_id.isdigit() else None
+                logger.info(f"✅ Got database IDs (plain int response) - session_id: {session_id_int}, user_id: {user_id_int}")
                 return (session_id_int, user_id_int)
+            
+            # Handle normal JSON object response
+            elif isinstance(response_data, dict):
+                session_id = response_data.get("id") or response_data.get("sessionId")
+                user_id_from_db = response_data.get("userId") or response_data.get("user_id")
+                
+                if session_id and user_id_from_db:
+                    session_id_int = int(session_id) if isinstance(session_id, (str, int)) else None
+                    user_id_int = int(user_id_from_db) if isinstance(user_id_from_db, (str, int)) else None
+                    logger.info(f"✅ Got database IDs - session_id: {session_id_int}, user_id: {user_id_int}")
+                    return (session_id_int, user_id_int)
+                else:
+                    logger.warning(f"⚠️ Missing IDs in response: {response_data}")
+                    return (None, None)
             else:
-                logger.warning(f"⚠️ Missing IDs in response: {response_data}")
+                logger.warning(f"⚠️ Unexpected response type: {type(response_data)} - {response_data}")
                 return (None, None)
     except Exception as e:
         logger.error(f"❌ DATABASE INSERT FAILED - Error: {e}")
