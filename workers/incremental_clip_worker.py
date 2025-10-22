@@ -257,8 +257,9 @@ class IncrementalClipWorker:
             )
         )
 
-        clip_url = f"s3://{self.clip_bucket}/{clip_key}"
-        thumbnail_url = f"s3://{self.clip_bucket}/{thumbnail_key}"
+        # Generate public HTTPS URLs instead of s3:// URIs
+        clip_url = f"https://{self.clip_bucket}.s3.amazonaws.com/{clip_key}"
+        thumbnail_url = f"https://{self.clip_bucket}.s3.amazonaws.com/{thumbnail_key}"
         return clip_url, thumbnail_url
 
     async def _notify_backend(self, job: ClipJob, clip_url: str, thumbnail_url: str) -> None:
