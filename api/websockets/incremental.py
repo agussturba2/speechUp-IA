@@ -373,6 +373,86 @@ class IncrementalOratorySession:
         logger.info("IncrementalOratorySession closed")
 
 
+async def _finalize_and_enqueue_clips(
+    session: IncrementalOratorySession,
+    result: Dict[str, Any],
+    db_session_id: str,
+    db_user_id: str,
+    context: str = ""
+) -> int:
+    """
+    Upload video to S3 and enqueue clip generation jobs.
+    
+    Args:
+        session: The oratory session
+        result: Analysis result dictionary
+        db_session_id: Database session ID
+        db_user_id: Database user ID
+        context: Context string for logging (e.g., "TIMEOUT", "DISCONNECT")
+    
+    Returns:
+        Number of clips enqueued
+    """
+    scheduler = None
+    try:
+        scheduler = ClipScheduler()
+        raw_events = result.get("events", []) or []
+        logger.warning(f"🧾 [{context}] Result keys: {list(result.keys())}")
+        logger.warning(f"🧾 [{context}] Raw events received: {len(raw_events)} -> {raw_events[:3] if raw_events else '[]'}")
+        logger.warning(f"🎬 [{context}] Building timeline for session")
+        
+        timeline = TimelineGenerator().build_timeline(result)
+        events = timeline.get("events", [])
+        
+        if not events:
+            logger.warning(f"🎯 [{context}] Timeline empty, attempting fallback from incremental metrics")
+            fallback_events = _build_fallback_events(session, result)
+            events = fallback_events
+            timeline["events"] = events
+            logger.warning(f"🎯 [{context}] Fallback produced {len(events)} events")
+        
+        logger.warning(f"🎬 [{context}] Timeline generated with {len(events)} events")
+        
+        if not events:
+            logger.warning(f"🎬 [{context}] No events in timeline, skipping clip generation")
+            return 0
+        
+        video_path = session._coordinator.video_manager.get_video_path()
+        duration_sec = result.get("media", {}).get("duration_sec")
+        
+        # Upload video to S3 before enqueuing clips
+        video_s3_url = None
+        if video_path and video_path.exists():
+            from api.services.s3_client import get_s3_client
+            import boto3
+            s3_key = f"temp-videos/{db_session_id}/{video_path.name}"
+            s3_client = await get_s3_client()
+            bucket = os.getenv("CLIP_BUCKET", "clips-bucket-speech-up")
+            await asyncio.to_thread(
+                s3_client.upload_file,
+                str(video_path),
+                bucket,
+                s3_key
+            )
+            video_s3_url = f"s3://{bucket}/{s3_key}"
+            logger.warning(f"📤 [{context}] Uploaded video to S3: {video_s3_url}")
+        
+        logger.warning(f"🎬 [{context}] Enqueuing clips: session_id={db_session_id}, user_id={db_user_id}, video_path={video_s3_url}, duration={duration_sec}s, events={len(events)}")
+        enqueued_count = await scheduler.enqueue_session(
+            str(db_session_id),
+            events,
+            video_path=video_s3_url,
+            duration_sec=duration_sec,
+            user_id=str(db_user_id)
+        )
+        logger.warning(f"🎬 [{context}] Successfully enqueued {enqueued_count} clip jobs to Redis")
+        return enqueued_count
+        
+    finally:
+        if scheduler:
+            await scheduler.close()
+
+
 async def handle_incremental_oratory_feedback(
     websocket: WebSocket,
     buffer_size: int = None,
@@ -521,55 +601,9 @@ async def handle_incremental_oratory_feedback(
                                 
                                 # Only generate clips if we have valid database IDs
                                 if db_session_id is not None and db_user_id is not None:
-                                    try:
-                                        scheduler = ClipScheduler()
-                                        raw_events = result.get("events", []) or []
-                                        logger.warning(f"🧾 Result keys: {list(result.keys())}")
-                                        logger.warning(f"🧾 Raw events received: {len(raw_events)} -> {raw_events[:3] if raw_events else '[]'}")
-                                        logger.warning(f"🎬 Building timeline for session {user_id}")
-                                        timeline = TimelineGenerator().build_timeline(result)
-                                        events = timeline.get("events", [])
-                                        if not events:
-                                            logger.warning(f"🎯 Timeline empty, attempting fallback from incremental metrics")
-                                            fallback_events = _build_fallback_events(session, result)
-                                            events = fallback_events
-                                            timeline["events"] = events
-                                            logger.warning(f"🎯 Fallback produced {len(events)} events")
-                                        logger.warning(f"🎬 Timeline generated with {len(events)} events")
-                                        if events:
-                                            video_path = session._coordinator.video_manager.get_video_path()
-                                            duration_sec = result.get("media", {}).get("duration_sec")
-                                            
-                                            # Upload video to S3 before enqueuing clips
-                                            video_s3_url = None
-                                            if video_path and video_path.exists():
-                                                from api.services.s3_client import get_s3_client
-                                                import boto3
-                                                s3_key = f"temp-videos/{db_session_id}/{video_path.name}"
-                                                s3_client = await get_s3_client()
-                                                bucket = os.getenv("CLIP_BUCKET", "clips-bucket-speech-up")
-                                                await asyncio.to_thread(
-                                                    s3_client.upload_file,
-                                                    str(video_path),
-                                                    bucket,
-                                                    s3_key
-                                                )
-                                                video_s3_url = f"s3://{bucket}/{s3_key}"
-                                                logger.warning(f"📤 Uploaded video to S3: {video_s3_url}")
-                                            
-                                            logger.warning(f"🎬 Enqueuing clips: session_id={db_session_id}, user_id={db_user_id}, video_path={video_s3_url}, duration={duration_sec}s, events={len(events)}")
-                                            enqueued_count = await scheduler.enqueue_session(
-                                                str(db_session_id),
-                                                events,
-                                                video_path=video_s3_url,
-                                                duration_sec=duration_sec,
-                                                user_id=str(db_user_id)
-                                            )
-                                            logger.warning(f"🎬 Successfully enqueued {enqueued_count} clip jobs to Redis")
-                                        else:
-                                            logger.warning(f"🎬 No events in timeline, skipping clip generation")
-                                    finally:
-                                        await scheduler.close()
+                                    await _finalize_and_enqueue_clips(
+                                        session, result, db_session_id, db_user_id, context="END_STREAM"
+                                    )
                                 else:
                                     logger.error(f"❌ Cannot generate clips: db_session_id={db_session_id}, db_user_id={db_user_id}. Session must be saved to database first.")
                                 # Send final status to client
@@ -641,55 +675,9 @@ async def handle_incremental_oratory_feedback(
                             
                             # Only generate clips if we have valid database IDs
                             if db_session_id is not None and db_user_id is not None:
-                                try:
-                                    scheduler = ClipScheduler()
-                                    raw_events = result.get("events", []) or []
-                                    logger.warning(f"🧾 [TIMEOUT] Result keys: {list(result.keys())}")
-                                    logger.warning(f"🧾 [TIMEOUT] Raw events: {len(raw_events)} -> {raw_events[:3] if raw_events else '[]'}")
-                                    logger.warning(f"🎬 [TIMEOUT] Building timeline for session {user_id}")
-                                    timeline = TimelineGenerator().build_timeline(result)
-                                    events = timeline.get("events", [])
-                                    if not events:
-                                        logger.warning(f"🎯 [TIMEOUT] Timeline empty, attempting fallback from incremental metrics")
-                                        fallback_events = _build_fallback_events(session, result)
-                                        events = fallback_events
-                                        timeline["events"] = events
-                                        logger.warning(f"🎯 [TIMEOUT] Fallback produced {len(events)} events")
-                                    logger.warning(f"🎬 [TIMEOUT] Timeline generated with {len(events)} events")
-                                    if events:
-                                        video_path = session._coordinator.video_manager.get_video_path()
-                                        duration_sec = result.get("media", {}).get("duration_sec")
-                                        
-                                        # Upload video to S3 before enqueuing clips
-                                        video_s3_url = None
-                                        if video_path and video_path.exists():
-                                            from api.services.s3_client import get_s3_client
-                                            import boto3
-                                            s3_key = f"temp-videos/{db_session_id}/{video_path.name}"
-                                            s3_client = await get_s3_client()
-                                            bucket = os.getenv("CLIP_BUCKET", "clips-bucket-speech-up")
-                                            await asyncio.to_thread(
-                                                s3_client.upload_file,
-                                                str(video_path),
-                                                bucket,
-                                                s3_key
-                                            )
-                                            video_s3_url = f"s3://{bucket}/{s3_key}"
-                                            logger.warning(f"📤 [TIMEOUT] Uploaded video to S3: {video_s3_url}")
-                                        
-                                        logger.warning(f"🎬 [TIMEOUT] Enqueuing clips: session_id={db_session_id}, user_id={db_user_id}, video_path={video_s3_url}, duration={duration_sec}s")
-                                        enqueued_count = await scheduler.enqueue_session(
-                                            str(db_session_id),
-                                            events,
-                                            user_id=str(db_user_id),
-                                            video_path=video_s3_url,
-                                            duration_sec=duration_sec
-                                        )
-                                        logger.warning(f"🎬 [TIMEOUT] Successfully enqueued {enqueued_count} clip jobs")
-                                    else:
-                                        logger.warning(f"🎬 [TIMEOUT] No events in timeline, skipping clip generation")
-                                finally:
-                                    await scheduler.close()
+                                await _finalize_and_enqueue_clips(
+                                    session, result, db_session_id, db_user_id, context="TIMEOUT"
+                                )
                             else:
                                 logger.error(f"❌ [TIMEOUT] Cannot generate clips: db_session_id={db_session_id}, db_user_id={db_user_id}. Session must be saved to database first.")
                             # Notify client
@@ -745,49 +733,9 @@ async def handle_incremental_oratory_feedback(
                     
                     # Only generate clips if we have valid database IDs
                     if db_session_id is not None and db_user_id is not None:
-                        try:
-                            scheduler = ClipScheduler()
-                            raw_events = result.get("events", []) or []
-                            logger.warning(f"🧾 [DISCONNECT] Result keys: {list(result.keys())}")
-                            logger.warning(f"🧾 [DISCONNECT] Raw events: {len(raw_events)} -> {raw_events[:3] if raw_events else '[]'}")
-                            logger.warning(f"🎬 [DISCONNECT] Building timeline for session {user_id}")
-                            timeline = TimelineGenerator().build_timeline(result)
-                            events = timeline.get("events", [])
-                            logger.warning(f"🎬 [DISCONNECT] Timeline generated with {len(events)} events")
-                            if events:
-                                video_path = session._coordinator.video_manager.get_video_path()
-                                duration_sec = result.get("media", {}).get("duration_sec")
-                                
-                                # Upload video to S3 before enqueuing clips
-                                video_s3_url = None
-                                if video_path and video_path.exists():
-                                    from api.services.s3_client import get_s3_client
-                                    import boto3
-                                    s3_key = f"temp-videos/{db_session_id}/{video_path.name}"
-                                    s3_client = await get_s3_client()
-                                    bucket = os.getenv("CLIP_BUCKET", "clips-bucket-speech-up")
-                                    await asyncio.to_thread(
-                                        s3_client.upload_file,
-                                        str(video_path),
-                                        bucket,
-                                        s3_key
-                                    )
-                                    video_s3_url = f"s3://{bucket}/{s3_key}"
-                                    logger.warning(f"📤 [DISCONNECT] Uploaded video to S3: {video_s3_url}")
-                                
-                                logger.warning(f"🎬 [DISCONNECT] Enqueuing clips: session_id={db_session_id}, user_id={db_user_id}, video_path={video_s3_url}, duration={duration_sec}s")
-                                enqueued_count = await scheduler.enqueue_session(
-                                    str(db_session_id),
-                                    events,
-                                    user_id=str(db_user_id),
-                                    video_path=video_s3_url,
-                                    duration_sec=duration_sec
-                                )
-                                logger.warning(f"🎬 [DISCONNECT] Successfully enqueued {enqueued_count} clip jobs")
-                            else:
-                                logger.warning(f"🎬 [DISCONNECT] No events in timeline, skipping clip generation")
-                        finally:
-                            await scheduler.close()
+                        await _finalize_and_enqueue_clips(
+                            session, result, db_session_id, db_user_id, context="DISCONNECT"
+                        )
                     else:
                         logger.error(f"❌ [DISCONNECT] Cannot generate clips: db_session_id={db_session_id}, db_user_id={db_user_id}. Session must be saved to database first.")
                     
