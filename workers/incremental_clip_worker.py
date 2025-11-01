@@ -282,14 +282,14 @@ class IncrementalClipWorker:
                 str(clip_path),
                 self.clip_bucket,
                 clip_key,
-                ExtraArgs={"ContentType": "video/mp4"},
+                ExtraArgs={"ContentType": "video/mp4","ACL": "public-read"},
             ),
             asyncio.to_thread(
                 s3_client.upload_file,
                 str(thumbnail_path),
                 self.clip_bucket,
                 thumbnail_key,
-                ExtraArgs={"ContentType": "image/jpeg"},
+                ExtraArgs={"ContentType": "image/jpeg","ACL": "public-read"},
             )
         )
 
