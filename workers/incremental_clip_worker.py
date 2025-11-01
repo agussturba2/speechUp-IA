@@ -191,29 +191,59 @@ class IncrementalClipWorker:
         start = max(job.start_sec - job.margin_sec, 0.0)
         duration = (job.end_sec + job.margin_sec) - start
         clip_path = Path(tempfile.gettempdir()) / f"{job.job_id}.mp4"
-        
-        logger.info(f"🎞️ Generating clip: start={start:.2f}s, duration={duration:.2f}s -> {clip_path}")
 
-        process = ffmpeg.input(job.video_path, ss=start, t=duration)
-        output = (
-            process
-            .output(
-                str(clip_path),
-                vcodec="copy",  # Use stream copy (no re-encoding) since libx264 is not available
-                acodec="copy",
-                movflags="faststart"
+        logger.info(f"🎞️ Generating MP4 clip: start={start:.2f}s, duration={duration:.2f}s -> {clip_path}")
+
+        # Detectar formato de entrada
+        input_format = Path(job.video_path).suffix.lower()
+
+        if input_format == '.avi':
+            # Conversión completa de AVI a MP4 con codecs estándar
+            process = ffmpeg.input(job.video_path, ss=start, t=duration)
+            output = (
+                process
+                .output(
+                    str(clip_path),
+                    vcodec="libx264",  # Codec H.264 estándar
+                    acodec="aac",  # Codec audio estándar
+                    pix_fmt="yuv420p",  # Formato de pixel compatible
+                    movflags="faststart",
+                    crf=23  # Calidad balanceada
+                )
             )
-        )
+        else:
+            # Para MP4 de entrada, usar stream copy cuando sea posible
+            process = ffmpeg.input(job.video_path, ss=start, t=duration)
+            output = (
+                process
+                .output(
+                    str(clip_path),
+                    vcodec="copy",
+                    acodec="copy",
+                    movflags="faststart"
+                )
+            )
+
         try:
             await asyncio.to_thread(output.run, overwrite_output=True, capture_stdout=True, capture_stderr=True)
+
+            # Verificar que el archivo de salida es un MP4 válido
+            if not clip_path.exists():
+                raise Exception("Clip file was not created")
+
+            file_size = clip_path.stat().st_size
+            if file_size == 0:
+                raise Exception("Clip file is empty")
+
+            logger.info(f"✅ MP4 clip generated: {file_size} bytes")
+            return clip_path
+
         except ffmpeg.Error as e:
             logger.error(f"❌ FFmpeg error generating clip:")
             logger.error(f"   Command: {' '.join(output.compile())}")
             logger.error(f"   Stdout: {e.stdout.decode() if e.stdout else 'N/A'}")
             logger.error(f"   Stderr: {e.stderr.decode() if e.stderr else 'N/A'}")
             raise
-        logger.info(f"✅ Clip generated: {clip_path.stat().st_size} bytes")
-        return clip_path
 
     async def _generate_thumbnail_direct(self, job: ClipJob) -> Path:
         """Generate thumbnail directly from source video (parallel with clip generation)."""
