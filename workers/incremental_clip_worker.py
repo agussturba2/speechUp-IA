@@ -198,7 +198,7 @@ class IncrementalClipWorker:
         input_format = Path(job.video_path).suffix.lower()
 
         if input_format == '.avi':
-            # Conversión completa de AVI a MP4 con codecs estándar
+            # Conversión compatible con FFmpeg antiguo
             process = ffmpeg.input(job.video_path, ss=start, t=duration)
             output = (
                 process
@@ -208,11 +208,12 @@ class IncrementalClipWorker:
                     acodec="aac",  # Codec audio estándar
                     pix_fmt="yuv420p",  # Formato de pixel compatible
                     movflags="faststart",
-                    crf=23  # Calidad balanceada
+                    # Eliminamos crf y usamos configuración básica
+                    **{'b:v': '1000k', 'b:a': '128k'}  # Bitrates fijos
                 )
             )
         else:
-            # Para MP4 de entrada, usar stream copy cuando sea posible
+            # Para MP4 de entrada, usar stream copy
             process = ffmpeg.input(job.video_path, ss=start, t=duration)
             output = (
                 process
