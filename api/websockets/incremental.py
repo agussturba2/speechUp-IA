@@ -10,8 +10,10 @@ VideoBufferManager, MetricsAnalyzer) from Phase 2 refactoring.
 
 import logging
 import os
+import tempfile
 import time
 import json
+from asyncio import subprocess
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 import cv2
@@ -425,17 +427,50 @@ async def _finalize_and_enqueue_clips(
         if video_path and video_path.exists():
             from api.services.s3_client import get_s3_client
             import boto3
-            s3_key = f"temp-videos/{db_session_id}/{video_path.name}"
-            s3_client = await get_s3_client()
-            bucket = os.getenv("CLIP_BUCKET", "clips-bucket-speech-up")
-            await asyncio.to_thread(
-                s3_client.upload_file,
-                str(video_path),
-                bucket,
-                s3_key
-            )
-            video_s3_url = f"s3://{bucket}/{s3_key}"
-            logger.warning(f"📤 [{context}] Uploaded video to S3: {video_s3_url}")
+
+            # Crear un archivo temporal con faststart
+            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp_file:
+                faststart_path = Path(tmp_file.name)
+
+            try:
+                # Reempaquetar el video para hacerlo streamable
+                logger.warning(f"⚙️ [{context}] Repacking video with +faststart for web streaming")
+                subprocess.run([
+                    "ffmpeg", "-y",
+                    "-i", str(video_path),
+                    "-movflags", "+faststart",
+                    "-c", "copy",
+                    str(faststart_path)
+                ], check=True)
+
+                # Subir a S3
+                s3_key = f"temp-videos/{db_session_id}/{video_path.name}"
+                s3_client = await get_s3_client()
+                bucket = os.getenv("CLIP_BUCKET", "clips-bucket-speech-up")
+
+                await asyncio.to_thread(
+                    s3_client.upload_file,
+                    str(faststart_path),
+                    bucket,
+                    s3_key
+                )
+
+                video_s3_url = f"s3://{bucket}/{s3_key}"
+                logger.warning(f"📤 [{context}] Uploaded streamable video to S3: {video_s3_url}")
+
+            except subprocess.CalledProcessError as e:
+                logger.error(f"❌ [{context}] Failed to repackage video with ffmpeg: {e}")
+                # fallback: subir el original por si acaso
+                await asyncio.to_thread(
+                    s3_client.upload_file,
+                    str(video_path),
+                    bucket,
+                    s3_key
+                )
+                video_s3_url = f"s3://{bucket}/{s3_key}"
+            finally:
+                if faststart_path.exists():
+                    faststart_path.unlink(missing_ok=True)
         
         logger.warning(f"🎬 [{context}] Enqueuing clips: session_id={db_session_id}, user_id={db_user_id}, video_path={video_s3_url}, duration={duration_sec}s, events={len(events)}")
         enqueued_count = await scheduler.enqueue_session(
