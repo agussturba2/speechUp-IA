@@ -193,21 +193,19 @@ class IncrementalClipWorker:
         duration = (job.end_sec + job.margin_sec) - start
         clip_path = Path(tempfile.gettempdir()) / f"{job.job_id}.mp4"
 
-        logger.info(f"🎞️ Generating web-optimized MP4 clip: start={start:.2f}s, duration={duration:.2f}s")
+        logger.info(f"🎞️ Generating MP4 clip with universal codecs")
 
-        # Usar subprocess directamente para mejor control
+        # Usar codecs que SIEMPRE están disponibles en FFmpeg básico
         cmd = [
             'ffmpeg', '-y',
             '-ss', str(start),
             '-i', job.video_path,
             '-t', str(duration),
-            '-c:v', 'libx264',  # H.264 para máxima compatibilidad
-            '-c:a', 'aac',  # AAC para audio
-            '-movflags', '+faststart',  # 🔥 CRUCIAL: metadata al inicio
-            '-pix_fmt', 'yuv420p',  # Compatibilidad universal
-            '-profile:v', 'baseline',  # Perfil más compatible
-            '-level', '3.0',  # Nivel de compatibilidad
-            '-f', 'mp4',  # Forzar formato MP4
+            '-c:v', 'mpeg4',  # Codec MPEG-4 universal
+            '-c:a', 'mp3',  # Codec MP3 universal
+            '-q:v', '3',  # Calidad video (1-31, menor = mejor)
+            '-q:a', '2',  # Calidad audio (0-9, menor = mejor)
+            '-movflags', '+faststart',
             str(clip_path)
         ]
 
@@ -217,7 +215,6 @@ class IncrementalClipWorker:
                 capture_output=True, text=True, check=True
             )
 
-            # Verificar que el archivo se creó correctamente
             if not clip_path.exists():
                 raise Exception("Clip file was not created")
 
@@ -225,7 +222,7 @@ class IncrementalClipWorker:
             if file_size == 0:
                 raise Exception("Clip file is empty")
 
-            logger.info(f"✅ Web-optimized MP4 clip generated: {file_size} bytes")
+            logger.info(f"✅ MP4 clip generated: {file_size} bytes")
             return clip_path
 
         except subprocess.CalledProcessError as e:
@@ -233,16 +230,23 @@ class IncrementalClipWorker:
             logger.error(f"   Command: {' '.join(cmd)}")
             logger.error(f"   Stderr: {e.stderr}")
 
-            # Fallback: intentar sin faststart si falla
-            logger.info("🔄 Trying fallback without faststart...")
-            cmd_remove_faststart = [c for c in cmd if c != '+faststart' and c != '-movflags']
+            # Último fallback: intentar sin parámetros de calidad
+            logger.info("🔄 Trying minimal FFmpeg command...")
+            cmd_minimal = [
+                'ffmpeg', '-y',
+                '-ss', str(start),
+                '-i', job.video_path,
+                '-t', str(duration),
+                str(clip_path)
+            ]
+
             result = await asyncio.to_thread(
-                subprocess.run, cmd_remove_faststart,
+                subprocess.run, cmd_minimal,
                 capture_output=True, text=True, check=True
             )
 
             if clip_path.exists() and clip_path.stat().st_size > 0:
-                logger.warning("⚠️ Clip generated without faststart - may not stream optimally")
+                logger.warning("⚠️ Clip generated with minimal settings")
                 return clip_path
             else:
                 raise
