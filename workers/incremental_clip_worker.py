@@ -275,27 +275,34 @@ class IncrementalClipWorker:
         clip_key = f"session-{job.session_id}/{job.job_id}.mp4"
         thumbnail_key = f"session-{job.session_id}/{job.job_id}.jpg"
 
-        # Upload both files in parallel
+        # Upload con configuración CORRECTA para streaming
         await asyncio.gather(
             asyncio.to_thread(
                 s3_client.upload_file,
                 str(clip_path),
                 self.clip_bucket,
                 clip_key,
-                ExtraArgs={"ContentType": "video/mp4","ACL": "public-read"},
+                ExtraArgs={
+                    "ContentType": "video/mp4",
+                    "ContentDisposition": "inline"  # 🔥 IMPORTANTE: reproducir en navegador
+                },
             ),
             asyncio.to_thread(
                 s3_client.upload_file,
                 str(thumbnail_path),
                 self.clip_bucket,
                 thumbnail_key,
-                ExtraArgs={"ContentType": "image/jpeg","ACL": "public-read"},
+                ExtraArgs={
+                    "ContentType": "image/jpeg",
+                    "ContentDisposition": "inline"                },
             )
         )
 
-        # Generate public HTTPS URLs instead of s3:// URIs
+        # Generar URLs que funcionen en navegadores
         clip_url = f"https://{self.clip_bucket}.s3.amazonaws.com/{clip_key}"
         thumbnail_url = f"https://{self.clip_bucket}.s3.amazonaws.com/{thumbnail_key}"
+
+        logger.info(f"🔗 Generated URLs - Clip: {clip_url}, Thumb: {thumbnail_url}")
         return clip_url, thumbnail_url
 
     async def _notify_backend(self, job: ClipJob, clip_url: str, thumbnail_url: str) -> None:
