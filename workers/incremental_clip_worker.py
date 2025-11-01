@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -192,40 +193,31 @@ class IncrementalClipWorker:
         duration = (job.end_sec + job.margin_sec) - start
         clip_path = Path(tempfile.gettempdir()) / f"{job.job_id}.mp4"
 
-        logger.info(f"🎞️ Generating MP4 clip: start={start:.2f}s, duration={duration:.2f}s -> {clip_path}")
+        logger.info(f"🎞️ Generating web-optimized MP4 clip: start={start:.2f}s, duration={duration:.2f}s")
 
-        # Detectar formato de entrada
-        input_format = Path(job.video_path).suffix.lower()
-
-        if input_format == '.avi':
-            # Usar codecs básicos que siempre están disponibles
-            process = ffmpeg.input(job.video_path, ss=start, t=duration)
-            output = (
-                process
-                .output(
-                    str(clip_path),
-                    vcodec="mpeg4",  # Codec MPEG-4 básico (siempre disponible)
-                    acodec="mp3",  # Codec MP3 (universal)
-                    movflags="faststart"
-                )
-            )
-        else:
-            # Para MP4 de entrada, usar stream copy
-            process = ffmpeg.input(job.video_path, ss=start, t=duration)
-            output = (
-                process
-                .output(
-                    str(clip_path),
-                    vcodec="copy",
-                    acodec="copy",
-                    movflags="faststart"
-                )
-            )
+        # Usar subprocess directamente para mejor control
+        cmd = [
+            'ffmpeg', '-y',
+            '-ss', str(start),
+            '-i', job.video_path,
+            '-t', str(duration),
+            '-c:v', 'libx264',  # H.264 para máxima compatibilidad
+            '-c:a', 'aac',  # AAC para audio
+            '-movflags', '+faststart',  # 🔥 CRUCIAL: metadata al inicio
+            '-pix_fmt', 'yuv420p',  # Compatibilidad universal
+            '-profile:v', 'baseline',  # Perfil más compatible
+            '-level', '3.0',  # Nivel de compatibilidad
+            '-f', 'mp4',  # Forzar formato MP4
+            str(clip_path)
+        ]
 
         try:
-            await asyncio.to_thread(output.run, overwrite_output=True, capture_stdout=True, capture_stderr=True)
+            result = await asyncio.to_thread(
+                subprocess.run, cmd,
+                capture_output=True, text=True, check=True
+            )
 
-            # Verificar que el archivo de salida es un MP4 válido
+            # Verificar que el archivo se creó correctamente
             if not clip_path.exists():
                 raise Exception("Clip file was not created")
 
@@ -233,15 +225,27 @@ class IncrementalClipWorker:
             if file_size == 0:
                 raise Exception("Clip file is empty")
 
-            logger.info(f"✅ MP4 clip generated: {file_size} bytes")
+            logger.info(f"✅ Web-optimized MP4 clip generated: {file_size} bytes")
             return clip_path
 
-        except ffmpeg.Error as e:
-            logger.error(f"❌ FFmpeg error generating clip:")
-            logger.error(f"   Command: {' '.join(output.compile())}")
-            logger.error(f"   Stdout: {e.stdout.decode() if e.stdout else 'N/A'}")
-            logger.error(f"   Stderr: {e.stderr.decode() if e.stderr else 'N/A'}")
-            raise
+        except subprocess.CalledProcessError as e:
+            logger.error(f"❌ FFmpeg error:")
+            logger.error(f"   Command: {' '.join(cmd)}")
+            logger.error(f"   Stderr: {e.stderr}")
+
+            # Fallback: intentar sin faststart si falla
+            logger.info("🔄 Trying fallback without faststart...")
+            cmd_remove_faststart = [c for c in cmd if c != '+faststart' and c != '-movflags']
+            result = await asyncio.to_thread(
+                subprocess.run, cmd_remove_faststart,
+                capture_output=True, text=True, check=True
+            )
+
+            if clip_path.exists() and clip_path.stat().st_size > 0:
+                logger.warning("⚠️ Clip generated without faststart - may not stream optimally")
+                return clip_path
+            else:
+                raise
 
     async def _generate_thumbnail_direct(self, job: ClipJob) -> Path:
         """Generate thumbnail directly from source video (parallel with clip generation)."""
