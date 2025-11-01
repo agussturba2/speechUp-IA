@@ -10,10 +10,10 @@ VideoBufferManager, MetricsAnalyzer) from Phase 2 refactoring.
 
 import logging
 import os
+import subprocess
 import tempfile
 import time
 import json
-from asyncio import subprocess
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 import cv2
