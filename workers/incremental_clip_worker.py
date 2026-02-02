@@ -22,12 +22,12 @@ from api.services.clip_scheduler import (
 )
 from api.services.db import get_database
 from api.services.s3_client import get_s3_client
+from config import settings
 
 logger = logging.getLogger(__name__)
 
 # Default configuration constants
 DEFAULT_CLIP_BUCKET = "clips-bucket-speech-up"
-DEFAULT_CLIPS_API_URL = "http://98.91.55.213:7070"
 DEFAULT_REDIS_URL = "redis://localhost:6379/0"
 
 
@@ -43,7 +43,7 @@ class IncrementalClipWorker:
     ) -> None:
         self.redis_url = redis_url or os.getenv("REDIS_URL") or DEFAULT_REDIS_URL
         self.clip_bucket = clip_bucket or os.getenv("CLIP_BUCKET") or DEFAULT_CLIP_BUCKET
-        self.clips_api_url = clips_api_url or os.getenv("CLIPS_API_URL") or DEFAULT_CLIPS_API_URL
+        self.clips_api_url = clips_api_url or os.getenv("CLIPS_API_URL") or settings.BACKEND_API_URL
         self._redis: Optional[redis.Redis] = None
         self._http_client: Optional[httpx.AsyncClient] = None
         self.max_retries = 3

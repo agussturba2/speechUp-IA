@@ -19,6 +19,7 @@ from video.pipeline import run_analysis_pipeline
 from video.metrics import build_metrics_response
 from api.schemas.analysis_json import AnalysisJSON
 from video.realtime import decode_frame_data
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +176,7 @@ async def send_analysis_result(user_id: str, result: Dict[str, Any]) -> tuple[Op
     Returns:
         tuple: (session_id: int, user_id: int) or (None, None) if failed
     """
-    url = "http://98.91.55.213:7070/session"
+    url = f"{settings.BACKEND_API_URL}/session"
     params = {"userId": user_id}
     
     logger.error(f"=== ATTEMPTING DATABASE INSERT ===")

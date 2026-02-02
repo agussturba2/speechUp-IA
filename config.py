@@ -34,6 +34,9 @@ class AppSettings(BaseSettings):
     WHISPER_DEVICE: str = Field("cpu", env="WHISPER_DEVICE")
     SPEECHUP_ASR_MODEL: str = Field("base", env="SPEECHUP_ASR_MODEL")
 
+    # --- External APIs ---
+    BACKEND_API_URL: str = Field("http://98.93.33.214:7070", env="BACKEND_API_URL")
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
