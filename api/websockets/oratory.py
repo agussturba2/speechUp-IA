@@ -175,7 +175,7 @@ async def send_analysis_result(user_id: str, result: Dict[str, Any]) -> tuple[Op
     Returns:
         tuple: (session_id: int, user_id: int) or (None, None) if failed
     """
-    url = "http://98.91.55.213:7070/session"
+    url = "http://35.171.91.105:7070/session"
     params = {"userId": user_id}
     
     logger.error(f"=== ATTEMPTING DATABASE INSERT ===")

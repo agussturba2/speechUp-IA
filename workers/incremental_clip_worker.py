@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # Default configuration constants
 DEFAULT_CLIP_BUCKET = "clips-bucket-speech-up"
-DEFAULT_CLIPS_API_URL = "http://98.91.55.213:7070"
+DEFAULT_CLIPS_API_URL = "http://35.171.91.105:7070"
 DEFAULT_REDIS_URL = "redis://localhost:6379/0"
 
 
